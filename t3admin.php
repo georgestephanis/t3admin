@@ -3,6 +3,7 @@
  * Plugin Name:  Temporary Titan Token
  * Description:  Hold the title of titan, if only for a tick
  * Version:      1.0.0
+ * Network:      true
  * Text Domain:  t3admin
  * Requires PHP: 7.4
  *
