@@ -12,24 +12,27 @@
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Temporary Titan Token — grants users a temporary elevated role that
- * automatically expires at a configured time.
+ * Temporary Titan Token — overlays a temporary elevated role on a user
+ * without touching their role in the database.
  *
- * All grants are recorded in a JSONL audit log, and a per-grant
- * wp_schedule_single_event() fires at expiry.  A user_has_cap filter
- * serves as a catch-all: if the scheduled event was ever missed the role
- * is revoked the moment the user next triggers a capability check.
+ * Elevation is applied purely via the user_has_cap filter, so the user's
+ * stored role is never modified.  Deactivating or deleting the plugin
+ * automatically removes the overlay and the user's real role takes effect
+ * immediately.  All grants are recorded in a JSONL audit log and a per-grant
+ * wp_schedule_single_event() marks the grant expired at the right moment;
+ * the filter also expires overdue grants inline as a safety net.
  *
  * @since 1.0.0
  */
 class Temporary_Titan_Token {
 
-	const VERSION     = '1.0.0';
-	const GRANTS_KEY  = 't3admin_grants';
-	const EXPIRE_HOOK = 't3admin_expire_grant';
-	const CAP         = 'promote_users';
-	const LOG_DIR     = 't3admin-logs';
-	const LOG_FILE    = 'access-grants.jsonl';
+	const VERSION          = '1.0.0';
+	const GRANTS_KEY       = 't3admin_grants';
+	const EXPIRE_HOOK      = 't3admin_expire_grant';
+	const CAP              = 'promote_users';
+	const LOG_DIR          = 't3admin-logs';
+	const LOG_FILE         = 'access-grants.jsonl';
+	const SUPER_ADMIN_ROLE = 'super_admin';
 
 	/**
 	 * Singleton instance.
@@ -106,21 +109,22 @@ class Temporary_Titan_Token {
 		add_action( 'admin_post_t3admin_grant', array( $this, 'handle_grant' ) );
 		add_action( 'admin_post_t3admin_revoke', array( $this, 'handle_revoke' ) );
 
-		// Enforce expiry in real-time: if the scheduled event was missed,
-		// revoke access the moment the user makes any capability check.
-		add_filter( 'user_has_cap', array( $this, 'enforce_expiry_on_cap_check' ), 10, 4 );
+		// Overlay temporary capabilities and enforce expiry on every cap check.
+		add_filter( 'user_has_cap', array( $this, 'filter_user_caps' ), 10, 4 );
 	}
 
 	// -------------------------------------------------------------------------
-	// Real-time expiry enforcement
+	// Capability filter
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Fires on every capability check.
+	 * Overlays temporary role capabilities on every capability check.
 	 *
-	 * If the user holds an active-but-overdue grant the role is reverted
-	 * immediately so missed scheduled events cannot leave an elevated role
-	 * in place indefinitely.
+	 * The user's role in the database is never modified.  If the grant is
+	 * still active the temporary role's capabilities are merged on top of the
+	 * user's real capabilities.  If the grant has expired it is marked as such
+	 * inline (safety net for missed scheduled events) and the real caps are
+	 * returned unchanged.
 	 *
 	 * @since 1.0.0
 	 *
@@ -130,24 +134,31 @@ class Temporary_Titan_Token {
 	 * @param WP_User  $user    The user object.
 	 * @return bool[]
 	 */
-	public function enforce_expiry_on_cap_check( $allcaps, $caps, $args, $user ) {
+	public function filter_user_caps( $allcaps, $caps, $args, $user ) {
 		if ( ! $user instanceof WP_User ) {
 			return $allcaps;
 		}
 		$grant = $this->user_active_grant( $user->ID );
-		if ( $grant && $grant['expires_at'] <= time() ) {
-			// Guard against re-entrance: set_role triggers another cap check.
+		if ( ! $grant ) {
+			return $allcaps;
+		}
+		if ( $grant['expires_at'] <= time() ) {
+			// Expire inline — static flag guards against re-entrance from any
+			// cap check that may fire inside update_option().
 			static $expiring = array();
 			if ( empty( $expiring[ $grant['id'] ] ) ) {
 				$expiring[ $grant['id'] ] = true;
 				$this->expire_grant( $grant['id'] );
 				unset( $expiring[ $grant['id'] ] );
-				// Reflect the reverted role in the returned capability array.
-				$refreshed = get_user_by( 'id', $user->ID );
-				if ( $refreshed ) {
-					return $refreshed->allcaps;
-				}
 			}
+			// Return real caps unchanged — the grant is no longer active.
+			return $allcaps;
+		}
+		// Merge the temporary role's capabilities on top of the user's real ones.
+		global $wp_roles;
+		$role = $wp_roles->get_role( $grant['temporary_role'] );
+		if ( $role ) {
+			$allcaps = array_merge( $allcaps, $role->capabilities );
 		}
 		return $allcaps;
 	}
@@ -157,7 +168,11 @@ class Temporary_Titan_Token {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Expires a single grant; called by its dedicated scheduled event.
+	 * Marks a grant as expired; called by its dedicated scheduled event.
+	 *
+	 * The user's database role is not modified — removing the active grant
+	 * record is sufficient because filter_user_caps() will no longer find an
+	 * active grant and will return the user's real capabilities unchanged.
 	 *
 	 * Safe to call multiple times — returns early if the grant is already
 	 * resolved.
@@ -171,16 +186,11 @@ class Temporary_Titan_Token {
 		if ( ! isset( $grants[ $grant_id ] ) || 'active' !== $grants[ $grant_id ]['status'] ) {
 			return;
 		}
-		$grant = $grants[ $grant_id ];
-		$user  = get_user_by( 'id', $grant['user_id'] );
-		if ( $user ) {
-			$user->set_role( $grant['original_role'] );
-		}
 		$grants[ $grant_id ]['status']      = 'expired';
 		$grants[ $grant_id ]['resolved_at'] = time();
 		update_option( self::GRANTS_KEY, $grants, false );
 		$this->log( 'expired', $grants[ $grant_id ] );
-		// Clean up the scheduled event if it somehow still exists.
+		// Remove the scheduled event if it somehow still exists.
 		$ts = wp_next_scheduled( self::EXPIRE_HOOK, array( $grant_id ) );
 		if ( $ts ) {
 			wp_unschedule_event( $ts, self::EXPIRE_HOOK, array( $grant_id ) );
@@ -230,15 +240,18 @@ class Temporary_Titan_Token {
 		$grants        = $this->all_grants();
 		$grants[ $id ] = $entry;
 		update_option( self::GRANTS_KEY, $grants, false );
-		$user->set_role( $new_role );
-		// Schedule a single event to expire the grant at the right moment.
+		// Schedule a single event to mark the grant expired at the right moment.
 		wp_schedule_single_event( $expires_at, self::EXPIRE_HOOK, array( $id ) );
 		$this->log( 'granted', $entry );
 		return $entry;
 	}
 
 	/**
-	 * Revokes an active grant and restores the user's original role.
+	 * Revokes an active grant.
+	 *
+	 * The user's database role is not modified.  Removing the active grant
+	 * record is sufficient — filter_user_caps() stops overlaying capabilities
+	 * on the next request.
 	 *
 	 * @since 1.0.0
 	 *
@@ -251,11 +264,6 @@ class Temporary_Titan_Token {
 		$grants = $this->all_grants();
 		if ( ! isset( $grants[ $grant_id ] ) || 'active' !== $grants[ $grant_id ]['status'] ) {
 			return false;
-		}
-		$grant = $grants[ $grant_id ];
-		$user  = get_user_by( 'id', $grant['user_id'] );
-		if ( $user ) {
-			$user->set_role( $grant['original_role'] );
 		}
 		$grants[ $grant_id ]['status']        = 'revoked';
 		$grants[ $grant_id ]['resolved_at']   = time();
