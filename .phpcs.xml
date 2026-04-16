@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<ruleset name="T3Admin">
+    <description>WordPress coding standards for Temporary Titan Token.</description>
+
+    <file>t3admin.php</file>
+
+    <arg name="basepath" value="."/>
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+
+    <rule ref="WordPress"/>
+
+    <!-- Single-file plugin; class-prefixed filename convention does not apply. -->
+    <rule ref="WordPress.Files.FileName">
+        <exclude name="WordPress.Files.FileName.InvalidClassFileName"/>
+    </rule>
+
+    <config name="minimum_supported_wp_version" value="6.0"/>
+    <config name="text_domain" value="t3admin"/>
+</ruleset>
