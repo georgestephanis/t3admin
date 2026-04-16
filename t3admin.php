@@ -111,6 +111,11 @@ class Temporary_Titan_Token {
 
 		// Overlay temporary capabilities and enforce expiry on every cap check.
 		add_filter( 'user_has_cap', array( $this, 'filter_user_caps' ), 10, 4 );
+
+		// On Multisite, also intercept is_super_admin() checks.
+		if ( is_multisite() ) {
+			add_filter( 'site_option_site_admins', array( $this, 'filter_super_admins' ) );
+		}
 	}
 
 	// -------------------------------------------------------------------------
@@ -156,11 +161,51 @@ class Temporary_Titan_Token {
 		}
 		// Merge the temporary role's capabilities on top of the user's real ones.
 		global $wp_roles;
-		$role = $wp_roles->get_role( $grant['temporary_role'] );
-		if ( $role ) {
-			$allcaps = array_merge( $allcaps, $role->capabilities );
+		if ( self::SUPER_ADMIN_ROLE === $grant['temporary_role'] ) {
+			// Super admin status on Multisite is handled by filter_super_admins();
+			// inject administrator capabilities here to cover direct cap checks.
+			$admin_role = $wp_roles->get_role( 'administrator' );
+			if ( $admin_role ) {
+				$allcaps = array_merge( $allcaps, $admin_role->capabilities );
+			}
+		} else {
+			$role = $wp_roles->get_role( $grant['temporary_role'] );
+			if ( $role ) {
+				$allcaps = array_merge( $allcaps, $role->capabilities );
+			}
 		}
 		return $allcaps;
+	}
+
+	/**
+	 * Injects temporarily-elevated users into the Multisite super-admin list.
+	 *
+	 * WordPress's is_super_admin() reads the 'site_admins' network option
+	 * directly rather than going through user_has_cap, so we filter that
+	 * option value to add any user who holds an active super-admin grant.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param mixed $super_admins Value of the site_admins network option.
+	 * @return array
+	 */
+	public function filter_super_admins( $super_admins ) {
+		if ( ! is_array( $super_admins ) ) {
+			$super_admins = array();
+		}
+		foreach ( $this->active_grants() as $grant ) {
+			if ( self::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
+				continue;
+			}
+			if ( $grant['expires_at'] <= time() ) {
+				continue;
+			}
+			$user = get_user_by( 'id', $grant['user_id'] );
+			if ( $user && ! in_array( $user->user_login, $super_admins, true ) ) {
+				$super_admins[] = $user->user_login;
+			}
+		}
+		return $super_admins;
 	}
 
 	// -------------------------------------------------------------------------
@@ -301,6 +346,26 @@ class Temporary_Titan_Token {
 				return isset( $g['status'] ) && 'active' === $g['status'];
 			}
 		);
+	}
+
+	/**
+	 * Returns a human-readable label for a role slug.
+	 *
+	 * Handles the synthetic 'super_admin' sentinel in addition to standard
+	 * WordPress role slugs.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $slug Role slug or self::SUPER_ADMIN_ROLE.
+	 * @return string Translated display name.
+	 */
+	private function role_label( $slug ) {
+		if ( self::SUPER_ADMIN_ROLE === $slug ) {
+			return __( 'Super Admin', 't3admin' );
+		}
+		global $wp_roles;
+		$name = isset( $wp_roles->roles[ $slug ]['name'] ) ? $wp_roles->roles[ $slug ]['name'] : $slug;
+		return translate_user_role( $name );
 	}
 
 	/**
@@ -467,10 +532,18 @@ class Temporary_Titan_Token {
 			exit;
 		}
 
-		global $wp_roles;
-		if ( ! isset( $wp_roles->roles[ $new_role ] ) ) {
-			wp_safe_redirect( add_query_arg( 't3admin_msg', 'bad_role', admin_url( 'users.php?page=t3admin' ) ) );
-			exit;
+		// Super admin grants require Multisite and an existing super admin.
+		if ( self::SUPER_ADMIN_ROLE === $new_role ) {
+			if ( ! is_multisite() || ! is_super_admin() ) {
+				wp_safe_redirect( add_query_arg( 't3admin_msg', 'no_super', admin_url( 'users.php?page=t3admin' ) ) );
+				exit;
+			}
+		} else {
+			global $wp_roles;
+			if ( ! isset( $wp_roles->roles[ $new_role ] ) ) {
+				wp_safe_redirect( add_query_arg( 't3admin_msg', 'bad_role', admin_url( 'users.php?page=t3admin' ) ) );
+				exit;
+			}
 		}
 
 		if ( 'datetime' === $expiry_type ) {
@@ -575,6 +648,7 @@ class Temporary_Titan_Token {
 			'bad_role'     => array( 'error', __( 'Invalid role selected.', 't3admin' ) ),
 			'past'         => array( 'error', __( 'Expiry time must be in the future.', 't3admin' ) ),
 			'invalid_user' => array( 'error', __( 'User not found.', 't3admin' ) ),
+			'no_super'     => array( 'error', __( 'Only Super Admins can grant Super Admin status.', 't3admin' ) ),
 		);
 		?>
 		<div class="wrap">
@@ -615,6 +689,11 @@ class Temporary_Titan_Token {
 						<td>
 							<select name="t3admin_role" id="t3r" required>
 								<option value=""><?php esc_html_e( '— Select a role —', 't3admin' ); ?></option>
+								<?php if ( is_multisite() && is_super_admin() ) : ?>
+									<option value="<?php echo esc_attr( self::SUPER_ADMIN_ROLE ); ?>">
+										<?php esc_html_e( 'Super Admin', 't3admin' ); ?>
+									</option>
+								<?php endif; ?>
 								<?php foreach ( $roles as $key => $label ) : ?>
 									<option value="<?php echo esc_attr( $key ); ?>">
 										<?php echo esc_html( translate_user_role( $label ) ); ?>
@@ -705,8 +784,8 @@ class Temporary_Titan_Token {
 								}
 								?>
 							</td>
-							<td><?php echo esc_html( $g['original_role'] ); ?></td>
-							<td><?php echo esc_html( $g['temporary_role'] ); ?></td>
+							<td><?php echo esc_html( $this->role_label( $g['original_role'] ) ); ?></td>
+							<td><?php echo esc_html( $this->role_label( $g['temporary_role'] ) ); ?></td>
 							<td>
 								<?php
 								if ( $granter ) {
@@ -842,7 +921,7 @@ class Temporary_Titan_Token {
 							<td>
 								<?php
 								if ( isset( $e['original_role'], $e['temporary_role'] ) ) {
-									echo esc_html( $e['original_role'] ) . ' &rarr; ' . esc_html( $e['temporary_role'] );
+									echo esc_html( $this->role_label( $e['original_role'] ) ) . ' &rarr; ' . esc_html( $this->role_label( $e['temporary_role'] ) );
 								}
 								?>
 							</td>
