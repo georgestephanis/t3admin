@@ -4,6 +4,8 @@
 
 A WordPress plugin that lets administrators temporarily elevate a user's role, with automatic expiry, real-time enforcement, and a full audit trail.
 
+[![Open in WordPress Playground](https://img.shields.io/badge/Open_in-WordPress_Playground-3858e9?style=for-the-badge&logo=wordpress&logoColor=white)](https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fraw.githubusercontent.com%2Fgeorgestephanis%2Ft3admin%2Ftrunk%2F.github%2Fblueprint.json)
+
 ---
 
 ## Features
