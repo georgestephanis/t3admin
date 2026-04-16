@@ -10,19 +10,24 @@ Temporary Titan Token (`t3admin`) lets WordPress admins (or network super-admins
 
 ```
 t3admin/
-├── t3admin.php      Single-file plugin — all logic lives here.
-├── composer.json    Dev-dependency manifest (WPCS, phpcs).
-├── .phpcs.xml       PHPCS configuration; run `composer phpcs` to lint.
-├── AGENTS.md        This file.
-├── README.md        GitHub readme.
-└── readme.txt       WordPress.org plugin directory readme.
+├── t3admin.php                         Thin loader — bootstraps sub-classes, lifecycle hooks.
+├── includes/
+│   ├── class-logger.php                T3Admin_Logger — JSONL audit log read/write.
+│   ├── class-grants.php                T3Admin_Grants — grant storage, cap filters, expiry.
+│   ├── class-log-list-table.php        T3Admin_Log_List_Table — WP_List_Table subclass.
+│   └── class-admin.php                 T3Admin_Admin — menu, tabs, form handlers, Users column.
+├── composer.json                       Dev-dependency manifest (WPCS, phpcs).
+├── .phpcs.xml                          PHPCS configuration; run `composer phpcs` to lint.
+├── AGENTS.md                           This file.
+├── README.md                           GitHub readme.
+└── readme.txt                          WordPress.org plugin directory readme.
 ```
 
-There are no build steps, no JavaScript bundles, and no additional PHP files.  All admin UI is rendered inline inside the class methods.
+There are no build steps and no JavaScript bundles.
 
 ## Architecture
 
-The plugin is a singleton class `Temporary_Titan_Token` instantiated at the bottom of `t3admin.php`.  Key sections:
+The plugin bootstraps from `t3admin.php` which instantiates `T3Admin_Logger`, `T3Admin_Grants`, and `T3Admin_Admin`, then registers `activate` / `deactivate` hooks and defers all other hook registration to `setup()` on `init`.  Key sections:
 
 ### Data storage
 
@@ -60,14 +65,16 @@ Appended to `{uploads}/t3admin-logs/access-grants.jsonl`.  Each line is a comple
 
 ### Admin UI
 
-Two pages registered under **Users** in wp-admin:
+One page registered under **Users** in the sidebar (`t3admin`), hosting two tabs:
 
-| Slug | Method | Purpose |
-|------|--------|---------|
-| `t3admin` | `page_main()` | Grant form + active grants table |
-| `t3admin-logs` | `page_logs()` | Paginated JSONL log viewer (50/page, newest first) |
+| Tab (`?tab=`) | Renderer | Purpose |
+|---------------|----------|---------|
+| `grants` (default) | `render_grants_tab()` | Grant form + active grants table |
+| `logs` | `render_logs_tab()` | `T3Admin_Log_List_Table` — 50/page, newest first |
 
 Form submissions go through `admin-post.php` (`admin_post_t3admin_grant`, `admin_post_t3admin_revoke`) and are protected by `wp_nonce_field()` / `check_admin_referer()`.
+
+The Users list table Role column is replaced with a custom `t3admin_role` column (via `manage_users_columns`) that shows the real role and, when a temp grant is active, a second italic line with the temp role and remaining time.  Hovering shows the exact expiry timestamp.
 
 ## Capability used
 
@@ -87,7 +94,7 @@ The ruleset is `.phpcs.xml` (WordPress standard, filename sniff excluded for the
 
 ## Key constraints for agents
 
-- **Do not** split into multiple files without updating `phpcs.xml` and this file.
+- When adding new files to `includes/`, add them to the `<file>` list in `.phpcs.xml` and update the file structure section above.
 - **Do not** add a recurring cron schedule.  Expiry runs through per-grant single events + the cap filter.  Adding `wp_schedule_event()` would be redundant and would require a cleanup path on deactivation.
 - **Do not** use `DB_HOST`, `DB_NAME`, etc.  This site uses the SQLite drop-in; those constants are not defined.
 - **Do not** use `FULLTEXT` indexes or raw `CREATE TABLE` SQL.
@@ -111,7 +118,7 @@ studio wp user create testuser testuser@example.com --role=subscriber
 studio wp eval '
 $plugin = Temporary_Titan_Token::instance();
 $users  = get_users(array("login" => "testuser"));
-$result = $plugin->grant($users[0]->ID, "editor", time() + 120, 1);
+$result = $plugin->grants->grant($users[0]->ID, "editor", time() + 120, 1);
 var_dump($result["status"]);
 '
 
