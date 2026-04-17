@@ -21,15 +21,13 @@ defined( 'ABSPATH' ) || exit;
  */
 class Grants {
 
-	const GRANTS_KEY          = 't3admin_grants';
-	const MIGRATED_KEY        = 't3admin_grants_network_migrated';
-	const MIGRATION_STATE_KEY = 't3admin_grants_network_migration_state';
-	const CACHE_GROUP         = 't3admin';
-	const EXPIRE_HOOK         = 't3admin_expire_grant';
-	const SUPER_ADMIN_ROLE    = 'super_admin';
-	const SCOPE_SITE          = 'site';
-	const SCOPE_NETWORK       = 'network';
-	const SCOPE_SUPER         = 'super_admin';
+	const GRANTS_KEY       = 't3admin_grants';
+	const CACHE_GROUP      = 't3admin';
+	const EXPIRE_HOOK      = 't3admin_expire_grant';
+	const SUPER_ADMIN_ROLE = 'super_admin';
+	const SCOPE_SITE       = 'site';
+	const SCOPE_NETWORK    = 'network';
+	const SCOPE_SUPER      = 'super_admin';
 
 	/**
 	 * Logger instance.
@@ -328,10 +326,6 @@ class Grants {
 			return $this->all_grants_cache;
 		}
 
-		if ( is_multisite() ) {
-			$this->maybe_migrate_to_network_storage();
-		}
-
 		$cache_key = $this->all_grants_cache_key();
 		$cached    = wp_cache_get( $cache_key, self::CACHE_GROUP );
 		if ( is_array( $cached ) ) {
@@ -484,23 +478,20 @@ class Grants {
 	 *
 	 * @since 1.0.0
 	 *
-	 * @param array $grant           Raw grant record.
-	 * @param int   $default_site_id Optional site ID used during migration when a site-scoped
-	 *                               grant has no valid blog_id. A value of 0 leaves the grant's
-	 *                               existing blog_id unchanged and applies no fallback.
+	 * @param array $grant Raw grant record.
 	 * @return array
 	 */
-	private function normalize_grant( array $grant, int $default_site_id = 0 ): array {
+	private function normalize_grant( array $grant ): array {
 		$scope          = $this->grant_scope( $grant );
 		$grant['scope'] = $scope;
 
 		if ( self::SCOPE_SITE === $scope ) {
 			$blog_id = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
-			if ( ! $blog_id && $default_site_id ) {
-				$blog_id = $default_site_id;
-			}
 			if ( $blog_id ) {
 				$grant['blog_id'] = $blog_id;
+			} else {
+				$grant['scope'] = self::SCOPE_NETWORK;
+				unset( $grant['blog_id'] );
 			}
 		} else {
 			unset( $grant['blog_id'] );
@@ -640,97 +631,6 @@ class Grants {
 		}
 		update_option( self::GRANTS_KEY, $grants, false );
 		$this->clear_grants_cache();
-	}
-
-	/**
-	 * Migrates legacy per-site grant stores into network canonical storage.
-	 *
-	 * @since 1.0.0
-	 */
-	private function maybe_migrate_to_network_storage(): void {
-		if ( ! is_multisite() ) {
-			return;
-		}
-
-		if ( get_site_option( self::MIGRATED_KEY ) ) {
-			return;
-		}
-
-		$network_grants = (array) get_site_option( self::GRANTS_KEY, array() );
-		if ( ! empty( $network_grants ) ) {
-			delete_site_option( self::MIGRATION_STATE_KEY );
-			update_site_option( self::MIGRATED_KEY, 1 );
-			return;
-		}
-
-		$state  = (array) get_site_option( self::MIGRATION_STATE_KEY, array() );
-		$merged = isset( $state['merged'] ) && is_array( $state['merged'] ) ? $state['merged'] : array();
-		$offset = isset( $state['offset'] ) ? (int) $state['offset'] : 0;
-
-		$sites = get_sites(
-			array(
-				'fields' => 'ids',
-				'number' => 0,
-			)
-		);
-
-		$total_sites = count( $sites );
-		if ( $offset >= $total_sites ) {
-			update_site_option( self::GRANTS_KEY, $merged );
-			$this->clear_grants_cache();
-			delete_site_option( self::MIGRATION_STATE_KEY );
-			update_site_option( self::MIGRATED_KEY, 1 );
-			return;
-		}
-
-		$time_budget = (float) apply_filters( 't3admin_migration_time_budget', 2.0 );
-		if ( $time_budget <= 0.0 ) {
-			$time_budget = 2.0;
-		}
-		$started_at = microtime( true );
-
-		for ( $i = $offset; $i < $total_sites; $i++ ) {
-			$site_id = $sites[ $i ];
-			$site_id = (int) $site_id;
-			switch_to_blog( $site_id );
-			$site_grants = (array) get_option( self::GRANTS_KEY, array() );
-			restore_current_blog();
-
-			foreach ( $site_grants as $id => $grant ) {
-				if ( ! is_array( $grant ) ) {
-					continue;
-				}
-				if ( ! isset( $grant['id'] ) ) {
-					$grant['id'] = is_string( $id ) ? $id : wp_generate_uuid4();
-				}
-
-				$grant = $this->normalize_grant( $grant, $site_id );
-				if ( isset( $merged[ $grant['id'] ] ) ) {
-					$original_id        = $grant['id'];
-					$grant['legacy_id'] = $original_id;
-					$grant['id']        = wp_generate_uuid4();
-				}
-
-				$merged[ $grant['id'] ] = $grant;
-			}
-
-			$offset = $i + 1;
-			if ( ( microtime( true ) - $started_at ) >= $time_budget && $offset < $total_sites ) {
-				update_site_option(
-					self::MIGRATION_STATE_KEY,
-					array(
-						'merged' => $merged,
-						'offset' => $offset,
-					)
-				);
-				return;
-			}
-		}
-
-		update_site_option( self::GRANTS_KEY, $merged );
-		$this->clear_grants_cache();
-		delete_site_option( self::MIGRATION_STATE_KEY );
-		update_site_option( self::MIGRATED_KEY, 1 );
 	}
 
 	/**

@@ -82,18 +82,11 @@ Establish a single canonical grant store on multisite while preserving the UX sp
 
 ## C-01e Migration
 
-1. One-time migration marker
-- Add site option marker, e.g. `t3admin_grants_network_migrated`.
+No migration is required for the current pre-release phase.
 
-2. Migration behavior
-- On multisite first read, if not migrated:
-  - Iterate sites and read each blog's local `t3admin_grants`.
-  - Normalize each grant to include `scope` and `blog_id` as needed.
-  - Merge into network-level grant store.
-  - Mark migration complete.
-
-3. Collision handling
-- If duplicate IDs occur, generate a new UUID and preserve original in a `legacy_id` field for traceability.
+- The plugin now assumes a single canonical format for grants.
+- Multisite uses network option storage directly.
+- Legacy compatibility and staged migration code are intentionally omitted.
 
 ## C-01f Verification and Tests
 
