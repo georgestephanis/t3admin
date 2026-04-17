@@ -134,26 +134,109 @@ class Logger {
 				'total'   => 0,
 			);
 		}
-		$lines = file( $path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
-		if ( ! $lines ) {
+
+		$per_page = max( 1, $per_page );
+		$page     = max( 1, $page );
+
+		$total = $this->count_non_empty_lines( $path );
+		if ( 0 === $total ) {
 			return array(
 				'entries' => array(),
 				'total'   => 0,
 			);
 		}
-		$total   = count( $lines );
-		$lines   = array_reverse( $lines );
-		$sliced  = array_slice( $lines, ( $page - 1 ) * $per_page, $per_page );
+
+		$offset_newest = ( $page - 1 ) * $per_page;
+		if ( $offset_newest >= $total ) {
+			return array(
+				'entries' => array(),
+				'total'   => $total,
+			);
+		}
+
+		$end_newest_exclusive = min( $offset_newest + $per_page, $total );
+		$start_original       = $total - $end_newest_exclusive;
+		$end_original         = $total - $offset_newest;
+
+		// Direct file I/O is intentional: WP_Filesystem requires an admin
+		// context and is inappropriate for background log reads.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$handle = fopen( $path, 'r' );
+		if ( false === $handle ) {
+			return array(
+				'entries' => array(),
+				'total'   => $total,
+			);
+		}
+
+		$lines          = array();
+		$non_empty_line = 0;
+		while ( true ) {
+			$line = fgets( $handle );
+			if ( false === $line ) {
+				break;
+			}
+			$trimmed = rtrim( $line, "\r\n" );
+			if ( '' === $trimmed ) {
+				continue;
+			}
+
+			if ( $non_empty_line >= $start_original && $non_empty_line < $end_original ) {
+				$lines[] = $trimmed;
+			}
+
+			++$non_empty_line;
+			if ( $non_empty_line >= $end_original ) {
+				break;
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $handle );
+
 		$entries = array();
-		foreach ( $sliced as $line ) {
+		foreach ( array_reverse( $lines ) as $line ) {
 			$decoded = json_decode( $line, true );
 			if ( $decoded ) {
 				$entries[] = $decoded;
 			}
 		}
+
 		return array(
 			'entries' => $entries,
 			'total'   => $total,
 		);
+	}
+
+	/**
+	 * Counts non-empty lines in a JSONL file.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $path Absolute path to the JSONL file.
+	 * @return int
+	 */
+	private function count_non_empty_lines( string $path ): int {
+		// Direct file I/O is intentional: WP_Filesystem requires an admin
+		// context and is inappropriate for background log reads.
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$handle = fopen( $path, 'r' );
+		if ( false === $handle ) {
+			return 0;
+		}
+
+		$count = 0;
+		while ( true ) {
+			$line = fgets( $handle );
+			if ( false === $line ) {
+				break;
+			}
+			if ( '' !== rtrim( $line, "\r\n" ) ) {
+				++$count;
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $handle );
+
+		return $count;
 	}
 }
