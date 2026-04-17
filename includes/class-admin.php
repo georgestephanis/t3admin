@@ -737,7 +737,7 @@ class Admin {
 			var userSearch = document.getElementById('t3_user_search');
 			var userSelect = document.getElementById('t3u');
 			var userStatus = document.getElementById('t3_user_status');
-			var searchController = null;
+			var searchController = null, searchTimeout = null;
 
 			function replaceUserOptions(options) {
 				if ( ! userSelect ) {
