@@ -57,6 +57,7 @@ class Admin {
 	 */
 	public function setup_hooks(): void {
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
+		add_action( 'network_admin_menu', array( $this, 'network_admin_menu' ) );
 		add_action( 'admin_post_t3admin_grant', array( $this, 'handle_grant' ) );
 		add_action( 'admin_post_t3admin_revoke', array( $this, 'handle_revoke' ) );
 		add_action( 'admin_head', array( $this, 'admin_styles' ) );
@@ -77,6 +78,10 @@ class Admin {
 	 * @since 1.0.0
 	 */
 	public function admin_menu(): void {
+		if ( is_multisite() && is_network_admin() ) {
+			return;
+		}
+
 		add_users_page(
 			__( 'Temporary Titan Token', 't3admin' ),
 			__( 'Temp Roles', 't3admin' ),
@@ -84,6 +89,77 @@ class Admin {
 			't3admin',
 			array( $this, 'page_main' )
 		);
+	}
+
+	/**
+	 * Registers the plugin's admin page in Network Admin.
+	 *
+	 * @since 1.0.0
+	 */
+	public function network_admin_menu(): void {
+		if ( ! is_multisite() ) {
+			return;
+		}
+
+		add_users_page(
+			__( 'Temporary Titan Token', 't3admin' ),
+			__( 'Temp Roles', 't3admin' ),
+			self::CAP,
+			't3admin',
+			array( $this, 'page_main' )
+		);
+	}
+
+	/**
+	 * Returns whether current request runs in Network Admin.
+	 *
+	 * @since 1.0.0
+	 * @return bool
+	 */
+	private function is_network_context(): bool {
+		return is_multisite() && is_network_admin();
+	}
+
+	/**
+	 * Returns the base page URL for the current admin context.
+	 *
+	 * @since 1.0.0
+	 * @return string
+	 */
+	private function page_url(): string {
+		if ( $this->is_network_context() ) {
+			return network_admin_url( 'users.php?page=t3admin' );
+		}
+		return admin_url( 'users.php?page=t3admin' );
+	}
+
+	/**
+	 * Returns the admin-post URL for the current admin context.
+	 *
+	 * @since 1.0.0
+	 * @return string
+	 */
+	private function post_url(): string {
+		if ( $this->is_network_context() ) {
+			return network_admin_url( 'admin-post.php' );
+		}
+		return admin_url( 'admin-post.php' );
+	}
+
+	/**
+	 * Redirects back to this plugin page with an optional message code.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $msg Message key.
+	 */
+	private function redirect_with_message( string $msg ): void {
+		$url = $this->page_url();
+		if ( '' !== $msg ) {
+			$url = add_query_arg( 't3admin_msg', $msg, $url );
+		}
+		wp_safe_redirect( $url );
+		exit;
 	}
 
 	// -------------------------------------------------------------------------
@@ -163,7 +239,7 @@ class Admin {
 		$grant = $this->grants->user_active_grant( $user_id );
 		if ( $grant && is_multisite() && Grants::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
 			$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
-			if ( $grant_blog && $grant_blog !== get_current_blog_id() ) {
+			if ( 0 !== $grant_blog && get_current_blog_id() !== $grant_blog ) {
 				$grant = null;
 			}
 		}
@@ -205,7 +281,7 @@ class Admin {
 		}
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- tab parameter, read-only routing.
 		$tab      = sanitize_key( $_GET['tab'] ?? 'grants' );
-		$base_url = admin_url( 'users.php?page=t3admin' );
+		$base_url = $this->page_url();
 		?>
 		<div class="wrap">
 			<h1><?php esc_html_e( 'Temporary Titan Token', 't3admin' ); ?></h1>
@@ -244,15 +320,16 @@ class Admin {
 	 */
 	private function render_grants_tab(): void {
 		global $wp_roles;
-		$roles  = $wp_roles->get_names();
-		$users  = get_users(
+		$roles              = $wp_roles->get_names();
+		$is_network_context = $this->is_network_context();
+		$users              = get_users(
 			array(
 				'number'  => -1,
 				'orderby' => 'display_name',
 				'order'   => 'ASC',
 			)
 		);
-		$active = $this->grants->active_grants();
+		$active             = $this->grants->active_grants();
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only redirect message.
 		$msg  = sanitize_key( $_GET['t3admin_msg'] ?? '' );
 		$msgs = array(
@@ -263,6 +340,7 @@ class Admin {
 			'past'         => array( 'error', __( 'Expiry time must be in the future.', 't3admin' ) ),
 			'invalid_user' => array( 'error', __( 'User not found.', 't3admin' ) ),
 			'no_super'     => array( 'error', __( 'Only Super Admins can grant Super Admin status.', 't3admin' ) ),
+			'bad_scope'    => array( 'error', __( 'Invalid scope selected for this admin context.', 't3admin' ) ),
 		);
 		if ( $msg && isset( $msgs[ $msg ] ) ) {
 			list( $type, $text ) = $msgs[ $msg ];
@@ -275,10 +353,22 @@ class Admin {
 		?>
 
 		<h2><?php esc_html_e( 'Grant Temporary Role', 't3admin' ); ?></h2>
-		<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+		<form method="post" action="<?php echo esc_url( $this->post_url() ); ?>">
 			<?php wp_nonce_field( 't3admin_grant' ); ?>
 			<input type="hidden" name="action" value="t3admin_grant">
 			<table class="form-table" role="presentation">
+				<?php if ( is_multisite() && $is_network_context ) : ?>
+				<tr>
+					<th><label for="t3scope"><?php esc_html_e( 'Grant Scope', 't3admin' ); ?></label></th>
+					<td>
+						<select name="t3admin_scope" id="t3scope">
+							<option value="<?php echo esc_attr( Grants::SCOPE_SITE ); ?>"><?php esc_html_e( 'Single Site', 't3admin' ); ?></option>
+							<option value="<?php echo esc_attr( Grants::SCOPE_NETWORK ); ?>"><?php esc_html_e( 'Whole Network', 't3admin' ); ?></option>
+							<option value="<?php echo esc_attr( Grants::SCOPE_SUPER ); ?>"><?php esc_html_e( 'Super Admin (Temporary)', 't3admin' ); ?></option>
+						</select>
+					</td>
+				</tr>
+				<?php endif; ?>
 				<tr>
 					<th><label for="t3u"><?php esc_html_e( 'User', 't3admin' ); ?></label></th>
 					<td>
@@ -292,25 +382,25 @@ class Admin {
 						</select>
 					</td>
 				</tr>
-				<tr>
+				<tr id="t3_role_row">
 					<th><label for="t3r"><?php esc_html_e( 'Temporary Role', 't3admin' ); ?></label></th>
 					<td>
 						<select name="t3admin_role" id="t3r" required>
 							<option value=""><?php esc_html_e( '— Select a role —', 't3admin' ); ?></option>
-							<?php if ( is_multisite() && is_super_admin() ) : ?>
-								<option value="<?php echo esc_attr( Grants::SUPER_ADMIN_ROLE ); ?>">
-									<?php esc_html_e( 'Super Admin', 't3admin' ); ?>
-								</option>
-							<?php endif; ?>
 							<?php foreach ( $roles as $key => $label ) : ?>
 								<option value="<?php echo esc_attr( $key ); ?>">
 									<?php echo esc_html( translate_user_role( $label ) ); ?>
 								</option>
 							<?php endforeach; ?>
 						</select>
+						<?php if ( is_multisite() && $is_network_context ) : ?>
+						<p class="description" id="t3_super_note" style="display:none">
+							<?php esc_html_e( 'Super Admin scope ignores role selection and grants temporary Super Admin access.', 't3admin' ); ?>
+						</p>
+						<?php endif; ?>
 					</td>
 				</tr>
-				<?php if ( is_multisite() ) : ?>
+				<?php if ( is_multisite() && $is_network_context ) : ?>
 				<tr id="t3_site">
 					<th><label for="t3s"><?php esc_html_e( 'Site', 't3admin' ); ?></label></th>
 					<td>
@@ -332,6 +422,21 @@ class Admin {
 							?>
 						</select>
 						<p class="description"><?php esc_html_e( 'The site this temporary role applies to.', 't3admin' ); ?></p>
+					</td>
+				</tr>
+				<?php elseif ( is_multisite() ) : ?>
+				<tr>
+					<th><?php esc_html_e( 'Site', 't3admin' ); ?></th>
+					<td>
+						<p class="description">
+							<?php
+							printf(
+								/* translators: %s: site name */
+								esc_html__( 'This panel grants roles for the current site only: %s', 't3admin' ),
+								esc_html( get_bloginfo( 'name' ) )
+							);
+							?>
+						</p>
 					</td>
 				</tr>
 				<?php endif; ?>
@@ -462,7 +567,7 @@ class Admin {
 							?>
 						</td>
 						<td>
-							<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+							<form method="post" action="<?php echo esc_url( $this->post_url() ); ?>">
 								<?php wp_nonce_field( 't3admin_revoke' ); ?>
 								<input type="hidden" name="action" value="t3admin_revoke">
 								<input type="hidden" name="t3admin_grant_id" value="<?php echo esc_attr( $g['id'] ); ?>">
@@ -480,22 +585,40 @@ class Admin {
 
 		<script>
 		(function () {
-			var dtRow   = document.getElementById('t3_dt');
-			var durRow  = document.getElementById('t3_dur');
-			var siteRow = document.getElementById('t3_site');
-			var roleEl  = document.getElementById('t3r');
+			var dtRow      = document.getElementById('t3_dt');
+			var durRow     = document.getElementById('t3_dur');
+			var siteRow    = document.getElementById('t3_site');
+			var scopeEl    = document.getElementById('t3scope');
+			var roleRow    = document.getElementById('t3_role_row');
+			var roleEl     = document.getElementById('t3r');
+			var superNote  = document.getElementById('t3_super_note');
 			document.querySelectorAll('input[name="t3admin_expiry_type"]').forEach(function (r) {
 				r.addEventListener('change', function () {
 					dtRow.style.display  = this.value === 'datetime' ? '' : 'none';
 					durRow.style.display = this.value === 'duration' ? '' : 'none';
 				});
 			});
-			if ( siteRow && roleEl ) {
-				function updateSiteRow() {
-					siteRow.style.display = roleEl.value === '<?php echo esc_js( Grants::SUPER_ADMIN_ROLE ); ?>' ? 'none' : '';
+			if ( scopeEl ) {
+				function updateScopeControls() {
+					var isSuperScope = scopeEl.value === '<?php echo esc_js( Grants::SCOPE_SUPER ); ?>';
+					var isSiteScope  = scopeEl.value === '<?php echo esc_js( Grants::SCOPE_SITE ); ?>';
+
+					if ( siteRow ) {
+						siteRow.style.display = isSiteScope ? '' : 'none';
+					}
+					if ( roleRow ) {
+						roleRow.style.display = isSuperScope ? 'none' : '';
+					}
+					if ( roleEl ) {
+						roleEl.required = !isSuperScope;
+					}
+					if ( superNote ) {
+						superNote.style.display = isSuperScope ? '' : 'none';
+					}
 				}
-				roleEl.addEventListener( 'change', updateSiteRow );
-				updateSiteRow();
+
+				scopeEl.addEventListener( 'change', updateScopeControls );
+				updateScopeControls();
 			}
 		}());
 		</script>
@@ -538,25 +661,35 @@ class Admin {
 		}
 		check_admin_referer( 't3admin_grant' );
 
-		$user_id     = absint( $_POST['t3admin_user_id'] ?? 0 );
-		$new_role    = sanitize_key( $_POST['t3admin_role'] ?? '' );
-		$expiry_type = sanitize_key( $_POST['t3admin_expiry_type'] ?? 'datetime' );
+		$user_id       = absint( $_POST['t3admin_user_id'] ?? 0 );
+		$new_role      = sanitize_key( wp_unslash( $_POST['t3admin_role'] ?? '' ) );
+		$expiry_type   = sanitize_key( wp_unslash( $_POST['t3admin_expiry_type'] ?? 'datetime' ) );
+		$requested_raw = sanitize_key( wp_unslash( $_POST['t3admin_scope'] ?? Grants::SCOPE_SITE ) );
+		$scope         = Grants::SCOPE_SITE;
 
-		if ( ! $user_id || ! $new_role ) {
-			wp_safe_redirect( add_query_arg( 't3admin_msg', 'missing', admin_url( 'users.php?page=t3admin' ) ) );
-			exit;
+		if ( is_multisite() && $this->is_network_context() ) {
+			if ( in_array( $requested_raw, array( Grants::SCOPE_SITE, Grants::SCOPE_NETWORK, Grants::SCOPE_SUPER ), true ) ) {
+				$scope = $requested_raw;
+			} else {
+				$this->redirect_with_message( 'bad_scope' );
+			}
+		} elseif ( is_multisite() && Grants::SCOPE_SITE !== $requested_raw ) {
+			$this->redirect_with_message( 'bad_scope' );
 		}
 
-		if ( Grants::SUPER_ADMIN_ROLE === $new_role ) {
-			if ( ! is_multisite() || ! is_super_admin() ) {
-				wp_safe_redirect( add_query_arg( 't3admin_msg', 'no_super', admin_url( 'users.php?page=t3admin' ) ) );
-				exit;
+		if ( ! $user_id || ( Grants::SCOPE_SUPER !== $scope && ! $new_role ) ) {
+			$this->redirect_with_message( 'missing' );
+		}
+
+		if ( Grants::SCOPE_SUPER === $scope ) {
+			if ( ! is_multisite() || ! $this->is_network_context() || ! is_super_admin() ) {
+				$this->redirect_with_message( 'no_super' );
 			}
+			$new_role = Grants::SUPER_ADMIN_ROLE;
 		} else {
 			global $wp_roles;
-			if ( ! isset( $wp_roles->roles[ $new_role ] ) ) {
-				wp_safe_redirect( add_query_arg( 't3admin_msg', 'bad_role', admin_url( 'users.php?page=t3admin' ) ) );
-				exit;
+			if ( Grants::SUPER_ADMIN_ROLE === $new_role || ! isset( $wp_roles->roles[ $new_role ] ) ) {
+				$this->redirect_with_message( 'bad_role' );
 			}
 		}
 
@@ -569,8 +702,8 @@ class Admin {
 				$expires_at = 0;
 			}
 		} else {
-			$duration   = max( 1, absint( $_POST['t3admin_duration'] ?? 1 ) );
-			$unit       = sanitize_key( $_POST['t3admin_duration_unit'] ?? 'hours' );
+			$duration   = max( 1, absint( wp_unslash( $_POST['t3admin_duration'] ?? 1 ) ) );
+			$unit       = sanitize_key( wp_unslash( $_POST['t3admin_duration_unit'] ?? 'hours' ) );
 			$mults      = array(
 				'minutes' => MINUTE_IN_SECONDS,
 				'hours'   => HOUR_IN_SECONDS,
@@ -580,22 +713,28 @@ class Admin {
 		}
 
 		if ( time() >= $expires_at ) {
-			wp_safe_redirect( add_query_arg( 't3admin_msg', 'past', admin_url( 'users.php?page=t3admin' ) ) );
-			exit;
+			$this->redirect_with_message( 'past' );
 		}
 
 		$blog_id = 0;
-		if ( is_multisite() && Grants::SUPER_ADMIN_ROLE !== $new_role ) {
-			$blog_id = absint( $_POST['t3admin_blog_id'] ?? get_current_blog_id() );
-			if ( ! get_site( $blog_id ) ) {
-				$blog_id = get_current_blog_id();
+		if ( is_multisite() ) {
+			if ( Grants::SCOPE_SITE === $scope ) {
+				if ( $this->is_network_context() ) {
+					$blog_id = absint( wp_unslash( $_POST['t3admin_blog_id'] ?? get_current_blog_id() ) );
+					if ( ! get_site( $blog_id ) ) {
+						$blog_id = get_current_blog_id();
+					}
+				} else {
+					$blog_id = get_current_blog_id();
+				}
+			} elseif ( ! $this->is_network_context() ) {
+				$this->redirect_with_message( 'bad_scope' );
 			}
 		}
 
-		$result = $this->grants->grant( $user_id, $new_role, $expires_at, get_current_user_id(), $blog_id );
+		$result = $this->grants->grant( $user_id, $new_role, $expires_at, get_current_user_id(), $blog_id, $scope );
 		$msg    = is_wp_error( $result ) ? $result->get_error_code() : 'granted';
-		wp_safe_redirect( add_query_arg( 't3admin_msg', $msg, admin_url( 'users.php?page=t3admin' ) ) );
-		exit;
+		$this->redirect_with_message( $msg );
 	}
 
 	/**
@@ -612,7 +751,6 @@ class Admin {
 		if ( $grant_id ) {
 			$this->grants->revoke( $grant_id, get_current_user_id() );
 		}
-		wp_safe_redirect( add_query_arg( 't3admin_msg', 'revoked', admin_url( 'users.php?page=t3admin' ) ) );
-		exit;
+		$this->redirect_with_message( 'revoked' );
 	}
 }

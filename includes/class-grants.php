@@ -22,8 +22,12 @@ defined( 'ABSPATH' ) || exit;
 class Grants {
 
 	const GRANTS_KEY       = 't3admin_grants';
+	const MIGRATED_KEY     = 't3admin_grants_network_migrated';
 	const EXPIRE_HOOK      = 't3admin_expire_grant';
 	const SUPER_ADMIN_ROLE = 'super_admin';
+	const SCOPE_SITE       = 'site';
+	const SCOPE_NETWORK    = 'network';
+	const SCOPE_SUPER      = 'super_admin';
 
 	/**
 	 * Logger instance.
@@ -63,11 +67,10 @@ class Grants {
 	/**
 	 * Overlays temporary role capabilities on every capability check.
 	 *
-	 * The user's role in the database is never modified.  If the grant is
-	 * still active the temporary role's capabilities are merged on top of the
-	 * user's real capabilities.  If the grant has expired it is marked as such
-	 * inline (safety net for missed scheduled events) and the real caps are
-	 * returned unchanged.
+	 * The user's role in the database is never modified.  If grants are still
+	 * active, their temporary role capabilities are merged on top of the
+	 * user's real capabilities.  Expired grants are resolved inline as a safety
+	 * net for missed scheduled events.
 	 *
 	 * @since 1.0.0
 	 *
@@ -81,42 +84,47 @@ class Grants {
 		if ( ! $user instanceof \WP_User ) {
 			return $allcaps;
 		}
-		$grant = $this->user_active_grant( $user->ID );
-		if ( ! $grant ) {
+
+		$grants = $this->grants_for_user( $user->ID );
+		if ( empty( $grants ) ) {
 			return $allcaps;
 		}
-		if ( $grant['expires_at'] <= time() ) {
-			// Expire inline — static flag guards against re-entrance from any
-			// cap check that may fire inside update_option().
-			static $expiring = array();
-			if ( empty( $expiring[ $grant['id'] ] ) ) {
-				$expiring[ $grant['id'] ] = true;
-				$this->expire_grant( $grant['id'] );
-				unset( $expiring[ $grant['id'] ] );
-			}
-			return $allcaps;
-		}
-		// On Multisite, non-super-admin grants are scoped to a single blog.
-		if ( is_multisite() && self::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
-			$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
-			if ( $grant_blog && $grant_blog !== get_current_blog_id() ) {
-				return $allcaps;
-			}
-		}
+
 		global $wp_roles;
-		if ( self::SUPER_ADMIN_ROLE === $grant['temporary_role'] ) {
-			// Super admin status on Multisite is handled by filter_super_admins();
-			// inject administrator capabilities here to cover direct cap checks.
-			$admin_role = $wp_roles->get_role( 'administrator' );
-			if ( $admin_role ) {
-				$allcaps = array_merge( $allcaps, $admin_role->capabilities );
+
+		foreach ( $grants as $grant ) {
+			if ( $grant['expires_at'] <= time() ) {
+				// Expire inline — static flag guards against re-entrance from any
+				// cap check that may fire inside update_option().
+				static $expiring = array();
+				if ( empty( $expiring[ $grant['id'] ] ) ) {
+					$expiring[ $grant['id'] ] = true;
+					$this->expire_grant( $grant['id'] );
+					unset( $expiring[ $grant['id'] ] );
+				}
+				continue;
 			}
-		} else {
+
+			if ( ! $this->grant_applies_to_blog( $grant, get_current_blog_id() ) ) {
+				continue;
+			}
+
+			if ( self::SUPER_ADMIN_ROLE === $grant['temporary_role'] ) {
+				// Super admin status on Multisite is handled by filter_super_admins();
+				// inject administrator capabilities here to cover direct cap checks.
+				$admin_role = $wp_roles->get_role( 'administrator' );
+				if ( $admin_role ) {
+					$allcaps = array_merge( $allcaps, $admin_role->capabilities );
+				}
+				continue;
+			}
+
 			$role = $wp_roles->get_role( $grant['temporary_role'] );
 			if ( $role ) {
 				$allcaps = array_merge( $allcaps, $role->capabilities );
 			}
 		}
+
 		return $allcaps;
 	}
 
@@ -136,8 +144,9 @@ class Grants {
 		if ( ! is_array( $super_admins ) ) {
 			$super_admins = array();
 		}
+
 		foreach ( $this->active_grants() as $grant ) {
-			if ( self::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
+			if ( self::SCOPE_SUPER !== $this->grant_scope( $grant ) ) {
 				continue;
 			}
 			if ( $grant['expires_at'] <= time() ) {
@@ -148,6 +157,7 @@ class Grants {
 				$super_admins[] = $user->user_login;
 			}
 		}
+
 		return $super_admins;
 	}
 
@@ -158,8 +168,8 @@ class Grants {
 	/**
 	 * Creates a temporary role grant for a user.
 	 *
-	 * Any existing active grant for the same user is superseded (revoked)
-	 * before the new one is created.
+	 * Any existing active grant for the same user and scope target is
+	 * superseded (revoked) before the new one is created.
 	 *
 	 * @since 1.0.0
 	 *
@@ -167,25 +177,50 @@ class Grants {
 	 * @param string $new_role   Role slug to grant temporarily.
 	 * @param int    $expires_at Unix timestamp when the grant expires.
 	 * @param int    $granted_by ID of the admin creating the grant.
-	 * @param int    $blog_id    Blog ID the grant applies to (0 = current; ignored for super_admin).
+	 * @param int    $blog_id    Blog ID the grant applies to.
+	 * @param string $scope      Scope key (site, network, super_admin).
 	 * @return array|\WP_Error Grant record on success, WP_Error on failure.
 	 */
-	public function grant( int $user_id, string $new_role, int $expires_at, int $granted_by, int $blog_id = 0 ) {
+	public function grant( int $user_id, string $new_role, int $expires_at, int $granted_by, int $blog_id = 0, string $scope = self::SCOPE_SITE ) {
 		$user = get_user_by( 'id', $user_id );
 		if ( ! $user ) {
 			return new \WP_Error( 'invalid_user', __( 'User not found.', 't3admin' ) );
 		}
-		$existing = $this->user_active_grant( $user_id );
-		if ( $existing ) {
-			$this->revoke( $existing['id'], $granted_by, 'superseded' );
+
+		$scope = $this->sanitize_scope( $scope, $new_role, $blog_id );
+		if ( self::SCOPE_SUPER === $scope ) {
+			$new_role = self::SUPER_ADMIN_ROLE;
+			$blog_id  = 0;
+		} elseif ( self::SCOPE_NETWORK === $scope ) {
+			$blog_id = 0;
+		} elseif ( is_multisite() ) {
+			$blog_id = $blog_id ? $blog_id : get_current_blog_id();
 		}
+
+		$new_target = $this->grant_target_key(
+			array(
+				'scope'   => $scope,
+				'blog_id' => $blog_id,
+			)
+		);
+
+		foreach ( $this->active_grants() as $existing ) {
+			if ( (int) $existing['user_id'] !== $user_id ) {
+				continue;
+			}
+			if ( $new_target === $this->grant_target_key( $existing ) ) {
+				$this->revoke( $existing['id'], $granted_by, 'superseded' );
+			}
+		}
+
 		// Resolve the user's current role on the target blog.
-		if ( is_multisite() && $blog_id && $blog_id !== get_current_blog_id() ) {
+		if ( is_multisite() && self::SCOPE_SITE === $scope && $blog_id && get_current_blog_id() !== $blog_id ) {
 			$blog_user = new \WP_User( $user_id, '', $blog_id );
 			$original  = ! empty( $blog_user->roles ) ? $blog_user->roles[0] : 'subscriber';
 		} else {
 			$original = ! empty( $user->roles ) ? $user->roles[0] : 'subscriber';
 		}
+
 		$id    = wp_generate_uuid4();
 		$entry = array(
 			'id'             => $id,
@@ -196,15 +231,19 @@ class Grants {
 			'granted_at'     => time(),
 			'expires_at'     => $expires_at,
 			'status'         => 'active',
+			'scope'          => $scope,
 		);
-		if ( is_multisite() && $blog_id ) {
+
+		if ( is_multisite() && self::SCOPE_SITE === $scope && $blog_id ) {
 			$entry['blog_id'] = $blog_id;
 		}
+
 		$grants        = $this->all_grants();
 		$grants[ $id ] = $entry;
-		update_option( self::GRANTS_KEY, $grants, false );
+		$this->save_grants( $grants );
 		wp_schedule_single_event( $expires_at, self::EXPIRE_HOOK, array( $id ) );
 		$this->logger->log( 'granted', $entry );
+
 		return $entry;
 	}
 
@@ -231,7 +270,7 @@ class Grants {
 		$grants[ $grant_id ]['resolved_at']   = time();
 		$grants[ $grant_id ]['revoked_by']    = $revoked_by;
 		$grants[ $grant_id ]['revoke_reason'] = $reason;
-		update_option( self::GRANTS_KEY, $grants, false );
+		$this->save_grants( $grants );
 		$this->logger->log( 'revoked', $grants[ $grant_id ] );
 		$ts = wp_next_scheduled( self::EXPIRE_HOOK, array( $grant_id ) );
 		if ( $ts ) {
@@ -257,7 +296,7 @@ class Grants {
 		}
 		$grants[ $grant_id ]['status']      = 'expired';
 		$grants[ $grant_id ]['resolved_at'] = time();
-		update_option( self::GRANTS_KEY, $grants, false );
+		$this->save_grants( $grants );
 		$this->logger->log( 'expired', $grants[ $grant_id ] );
 		$ts = wp_next_scheduled( self::EXPIRE_HOOK, array( $grant_id ) );
 		if ( $ts ) {
@@ -270,13 +309,30 @@ class Grants {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Returns all grants (active, expired, and revoked) from the option store.
+	 * Returns all grants (active, expired, and revoked) from canonical storage.
 	 *
 	 * @since 1.0.0
 	 * @return array<string, array>
 	 */
 	public function all_grants(): array {
-		return (array) get_option( self::GRANTS_KEY, array() );
+		if ( is_multisite() ) {
+			$this->maybe_migrate_to_network_storage();
+		}
+
+		$raw        = $this->load_grants();
+		$normalized = array();
+
+		foreach ( $raw as $id => $grant ) {
+			if ( ! is_array( $grant ) ) {
+				continue;
+			}
+			if ( ! isset( $grant['id'] ) ) {
+				$grant['id'] = is_string( $id ) ? $id : wp_generate_uuid4();
+			}
+			$normalized[ $grant['id'] ] = $this->normalize_grant( $grant );
+		}
+
+		return $normalized;
 	}
 
 	/**
@@ -295,7 +351,28 @@ class Grants {
 	}
 
 	/**
+	 * Returns active grants for a specific user.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $user_id WordPress user ID.
+	 * @return array<int, array>
+	 */
+	public function grants_for_user( int $user_id ): array {
+		$matched = array();
+		foreach ( $this->active_grants() as $grant ) {
+			if ( (int) $grant['user_id'] === $user_id ) {
+				$matched[] = $grant;
+			}
+		}
+		return $matched;
+	}
+
+	/**
 	 * Returns the active grant for a specific user, or null if none exists.
+	 *
+	 * This is used by the Users list column to show the strongest currently
+	 * effective grant for the current blog context.
 	 *
 	 * @since 1.0.0
 	 *
@@ -303,12 +380,33 @@ class Grants {
 	 * @return array|null Grant record, or null.
 	 */
 	public function user_active_grant( int $user_id ): ?array {
-		foreach ( $this->active_grants() as $g ) {
-			if ( (int) $g['user_id'] === $user_id ) {
-				return $g;
+		$matched = array();
+		foreach ( $this->grants_for_user( $user_id ) as $grant ) {
+			if ( $grant['expires_at'] <= time() ) {
+				continue;
+			}
+			if ( $this->grant_applies_to_blog( $grant, get_current_blog_id() ) ) {
+				$matched[] = $grant;
 			}
 		}
-		return null;
+
+		if ( empty( $matched ) ) {
+			return null;
+		}
+
+		usort(
+			$matched,
+			function ( $a, $b ) {
+				$prio_a = $this->scope_priority( $a );
+				$prio_b = $this->scope_priority( $b );
+				if ( $prio_a === $prio_b ) {
+					return (int) $b['expires_at'] <=> (int) $a['expires_at'];
+				}
+				return $prio_b <=> $prio_a;
+			}
+		);
+
+		return $matched[0];
 	}
 
 	/**
@@ -329,5 +427,259 @@ class Grants {
 		global $wp_roles;
 		$name = isset( $wp_roles->roles[ $slug ]['name'] ) ? $wp_roles->roles[ $slug ]['name'] : $slug;
 		return translate_user_role( $name );
+	}
+
+	/**
+	 * Returns the normalized scope value for a grant record.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant Grant record.
+	 * @return string
+	 */
+	public function grant_scope( array $grant ): string {
+		if ( isset( $grant['scope'] ) && is_string( $grant['scope'] ) ) {
+			$scope = sanitize_key( $grant['scope'] );
+			if ( in_array( $scope, array( self::SCOPE_SITE, self::SCOPE_NETWORK, self::SCOPE_SUPER ), true ) ) {
+				return $scope;
+			}
+		}
+
+		if ( self::SUPER_ADMIN_ROLE === ( $grant['temporary_role'] ?? '' ) ) {
+			return self::SCOPE_SUPER;
+		}
+
+		if ( ! empty( $grant['blog_id'] ) ) {
+			return self::SCOPE_SITE;
+		}
+
+		return self::SCOPE_NETWORK;
+	}
+
+	/**
+	 * Normalizes a grant record to include canonical scope details.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant           Raw grant record.
+	 * @param int   $default_site_id Optional site ID used during migration when a site-scoped
+	 *                               grant has no valid blog_id. A value of 0 leaves the grant's
+	 *                               existing blog_id unchanged and applies no fallback.
+	 * @return array
+	 */
+	private function normalize_grant( array $grant, int $default_site_id = 0 ): array {
+		$scope          = $this->grant_scope( $grant );
+		$grant['scope'] = $scope;
+
+		if ( self::SCOPE_SITE === $scope ) {
+			$blog_id = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
+			if ( ! $blog_id && $default_site_id ) {
+				$blog_id = $default_site_id;
+			}
+			if ( $blog_id ) {
+				$grant['blog_id'] = $blog_id;
+			}
+		} else {
+			unset( $grant['blog_id'] );
+		}
+
+		if ( self::SCOPE_SUPER === $scope ) {
+			$grant['temporary_role'] = self::SUPER_ADMIN_ROLE;
+		}
+
+		return $grant;
+	}
+
+	/**
+	 * Returns whether a grant applies to a blog.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant   Grant record.
+	 * @param int   $blog_id Blog ID.
+	 * @return bool
+	 */
+	private function grant_applies_to_blog( array $grant, int $blog_id ): bool {
+		$scope = $this->grant_scope( $grant );
+		if ( self::SCOPE_SUPER === $scope || self::SCOPE_NETWORK === $scope ) {
+			return true;
+		}
+
+		$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
+		if ( ! $grant_blog ) {
+			return false;
+		}
+
+		return $grant_blog === $blog_id;
+	}
+
+	/**
+	 * Returns priority for choosing a display grant.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant Grant record.
+	 * @return int
+	 */
+	private function scope_priority( array $grant ): int {
+		$scope = $this->grant_scope( $grant );
+		if ( self::SCOPE_SUPER === $scope ) {
+			return 3;
+		}
+		if ( self::SCOPE_NETWORK === $scope ) {
+			return 2;
+		}
+		return 1;
+	}
+
+	/**
+	 * Sanitizes a requested scope based on role and context.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $scope    Requested scope.
+	 * @param string $new_role Requested role.
+	 * @param int    $blog_id  Requested blog ID.
+	 * @return string
+	 */
+	private function sanitize_scope( string $scope, string $new_role, int $blog_id ): string {
+		$scope = sanitize_key( $scope );
+
+		if ( self::SUPER_ADMIN_ROLE === $new_role ) {
+			return self::SCOPE_SUPER;
+		}
+
+		if ( ! is_multisite() ) {
+			return self::SCOPE_SITE;
+		}
+
+		if ( self::SCOPE_NETWORK === $scope ) {
+			return self::SCOPE_NETWORK;
+		}
+
+		if ( self::SCOPE_SITE === $scope ) {
+			return self::SCOPE_SITE;
+		}
+
+		if ( $blog_id ) {
+			return self::SCOPE_SITE;
+		}
+
+		return self::SCOPE_NETWORK;
+	}
+
+	/**
+	 * Returns a target key used for superseding existing grants.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant Grant record.
+	 * @return string
+	 */
+	private function grant_target_key( array $grant ): string {
+		$scope = $this->grant_scope( $grant );
+		if ( self::SCOPE_SUPER === $scope ) {
+			return self::SCOPE_SUPER;
+		}
+		if ( self::SCOPE_NETWORK === $scope ) {
+			return self::SCOPE_NETWORK;
+		}
+
+		$blog_id = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
+		return self::SCOPE_SITE . ':' . (string) $blog_id;
+	}
+
+	/**
+	 * Loads grant records from canonical storage.
+	 *
+	 * @since 1.0.0
+	 * @return array<string, array>
+	 */
+	private function load_grants(): array {
+		if ( is_multisite() ) {
+			return (array) get_site_option( self::GRANTS_KEY, array() );
+		}
+		return (array) get_option( self::GRANTS_KEY, array() );
+	}
+
+	/**
+	 * Persists grant records to canonical storage.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array<string, array> $grants Grant map.
+	 */
+	private function save_grants( array $grants ): void {
+		if ( is_multisite() ) {
+			update_site_option( self::GRANTS_KEY, $grants );
+			return;
+		}
+		update_option( self::GRANTS_KEY, $grants, false );
+	}
+
+	/**
+	 * Migrates legacy per-site grant stores into network canonical storage.
+	 *
+	 * @since 1.0.0
+	 */
+	private function maybe_migrate_to_network_storage(): void {
+		if ( ! is_multisite() ) {
+			return;
+		}
+
+		if ( get_site_option( self::MIGRATED_KEY ) ) {
+			return;
+		}
+
+		$network_grants = (array) get_site_option( self::GRANTS_KEY, array() );
+		if ( ! empty( $network_grants ) ) {
+			update_site_option( self::MIGRATED_KEY, 1 );
+			return;
+		}
+
+		$merged = array();
+		$sites  = get_sites(
+			array(
+				'fields' => 'ids',
+				'number' => 0,
+			)
+		);
+
+		foreach ( $sites as $site_id ) {
+			$site_id = (int) $site_id;
+			switch_to_blog( $site_id );
+			$site_grants = (array) get_option( self::GRANTS_KEY, array() );
+			restore_current_blog();
+
+			foreach ( $site_grants as $id => $grant ) {
+				if ( ! is_array( $grant ) ) {
+					continue;
+				}
+				if ( ! isset( $grant['id'] ) ) {
+					$grant['id'] = is_string( $id ) ? $id : wp_generate_uuid4();
+				}
+
+				$grant = $this->normalize_grant( $grant, $site_id );
+					$original_id        = $grant['id'];
+					$grant['legacy_id'] = $original_id;
+					$grant['id']        = wp_generate_uuid4();
+					error_log(
+						sprintf(
+							't3admin grant migration resolved duplicate grant ID "%1$s" from site %2$d with new ID "%3$s".',
+							$original_id,
+							$site_id,
+							$grant['id']
+						)
+					);
+					$grant['legacy_id'] = $grant['id'];
+					$grant['id']        = wp_generate_uuid4();
+				}
+
+				$merged[ $grant['id'] ] = $grant;
+			}
+		}
+
+		update_site_option( self::GRANTS_KEY, $merged );
+		update_site_option( self::MIGRATED_KEY, 1 );
 	}
 }
