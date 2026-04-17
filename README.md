@@ -18,7 +18,7 @@ A WordPress plugin that lets administrators temporarily elevate a user's role, w
   - A `user_has_cap` filter acts as a catch-all: even if the scheduled event was missed (low-traffic site, cron backlog) the elevated permission is revoked the moment the user makes any capability check.
 - **Superseding grants** — granting a new temporary role to a user who already has one automatically revokes the old grant first.
 - **Manual revocation** — admins can revoke any active grant instantly from the admin UI.
-- **JSONL audit log** — every grant, revocation, and automatic expiry is appended to `wp-content/uploads/t3admin-logs/access-grants.jsonl`.  The file is protected from direct HTTP access via `.htaccess`.
+- **JSONL audit log** — every grant, revocation, and automatic expiry is appended to `wp-content/uploads/t3admin-logs/access-grants.jsonl`.  The directory is protected from direct HTTP access via `.htaccess` (Apache) and `web.config` (IIS).
 - **In-admin log viewer** — paginated log table under **Users → Temp Role Logs**, readable without file-system access.
 - **Multisite-aware** — uses the `promote_users` capability, which is held by Administrators on single sites and Super Admins on Multisite networks.
 - **Fully internationalised** — all strings are wrapped with i18n functions and the `t3admin` text domain.
@@ -88,7 +88,9 @@ Click **View Access Logs** at the bottom of the grants page, or navigate to **Us
 | Actor | Admin who granted or revoked (System for automatic expiry) |
 | Expires At | Scheduled expiry time |
 
-The raw JSONL file is at `wp-content/uploads/t3admin-logs/access-grants.jsonl` and is blocked from direct web access.
+The raw JSONL file is at `wp-content/uploads/t3admin-logs/access-grants.jsonl` and is blocked from direct web access on Apache and IIS.
+
+If you run Nginx, add an explicit deny rule for `/wp-content/uploads/t3admin-logs/` in your server config.
 
 ---
 

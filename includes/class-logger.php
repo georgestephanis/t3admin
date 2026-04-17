@@ -43,8 +43,8 @@ class Logger {
 	/**
 	 * Creates the log directory and protective files if they do not exist.
 	 *
-	 * Writes an .htaccess that denies direct HTTP access and an index.php
-	 * stub so directory listings reveal nothing.
+	 * Writes web-server deny rules and index stubs to reduce direct HTTP
+	 * exposure across common stacks.
 	 *
 	 * @since 1.0.0
 	 */
@@ -55,8 +55,26 @@ class Logger {
 		}
 		$htaccess = $dir . '/.htaccess';
 		if ( ! file_exists( $htaccess ) ) {
+			$rules = "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n"
+				. "<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n";
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
-			file_put_contents( $htaccess, "Require all denied\n" );
+			file_put_contents( $htaccess, $rules );
+		}
+		$web_config = $dir . '/web.config';
+		if ( ! file_exists( $web_config ) ) {
+			$config = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+				. "<configuration>\n"
+				. "\t<system.webServer>\n"
+				. "\t\t<security>\n"
+				. "\t\t\t<authorization>\n"
+				. "\t\t\t\t<remove users=\"*\" roles=\"\" verbs=\"\" />\n"
+				. "\t\t\t\t<add accessType=\"Deny\" users=\"*\" />\n"
+				. "\t\t\t</authorization>\n"
+				. "\t\t</security>\n"
+				. "\t</system.webServer>\n"
+				. "</configuration>\n";
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+			file_put_contents( $web_config, $config );
 		}
 		$index = $dir . '/index.php';
 		if ( ! file_exists( $index ) ) {
