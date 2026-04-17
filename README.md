@@ -67,9 +67,11 @@ wp plugin activate t3admin
 3. Select a **User** from the dropdown.
 4. Choose the **Temporary Role** to grant.
 5. On Multisite Network Admin, choose **Grant Scope**:
-  - **Single Site**
-  - **Whole Network**
-  - **Super Admin (Temporary)**
+
+- **Single Site**
+- **Whole Network**
+- **Super Admin (Temporary)**
+
 6. Set the **Expiry Type**:
    - **Specific date & time** — pick a datetime (the site's configured timezone applies).
    - **Duration from now** — enter a number and choose Minutes, Hours, or Days.
