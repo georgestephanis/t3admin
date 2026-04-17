@@ -661,7 +661,7 @@ class Admin {
 		}
 		check_admin_referer( 't3admin_grant' );
 
-		$user_id       = absint( $_POST['t3admin_user_id'] ?? 0 );
+		$user_id       = absint( wp_unslash( $_POST['t3admin_user_id'] ?? 0 ) );
 		$new_role      = sanitize_key( wp_unslash( $_POST['t3admin_role'] ?? '' ) );
 		$expiry_type   = sanitize_key( wp_unslash( $_POST['t3admin_expiry_type'] ?? 'datetime' ) );
 		$requested_raw = sanitize_key( wp_unslash( $_POST['t3admin_scope'] ?? Grants::SCOPE_SITE ) );
