@@ -21,13 +21,14 @@ defined( 'ABSPATH' ) || exit;
  */
 class Grants {
 
-	const GRANTS_KEY       = 't3admin_grants';
-	const MIGRATED_KEY     = 't3admin_grants_network_migrated';
-	const EXPIRE_HOOK      = 't3admin_expire_grant';
-	const SUPER_ADMIN_ROLE = 'super_admin';
-	const SCOPE_SITE       = 'site';
-	const SCOPE_NETWORK    = 'network';
-	const SCOPE_SUPER      = 'super_admin';
+	const GRANTS_KEY          = 't3admin_grants';
+	const MIGRATED_KEY        = 't3admin_grants_network_migrated';
+	const MIGRATION_STATE_KEY = 't3admin_grants_network_migration_state';
+	const EXPIRE_HOOK         = 't3admin_expire_grant';
+	const SUPER_ADMIN_ROLE    = 'super_admin';
+	const SCOPE_SITE          = 'site';
+	const SCOPE_NETWORK       = 'network';
+	const SCOPE_SUPER         = 'super_admin';
 
 	/**
 	 * Logger instance.
@@ -633,19 +634,38 @@ class Grants {
 
 		$network_grants = (array) get_site_option( self::GRANTS_KEY, array() );
 		if ( ! empty( $network_grants ) ) {
+			delete_site_option( self::MIGRATION_STATE_KEY );
 			update_site_option( self::MIGRATED_KEY, 1 );
 			return;
 		}
 
-		$merged = array();
-		$sites  = get_sites(
+		$state  = (array) get_site_option( self::MIGRATION_STATE_KEY, array() );
+		$merged = isset( $state['merged'] ) && is_array( $state['merged'] ) ? $state['merged'] : array();
+		$offset = isset( $state['offset'] ) ? (int) $state['offset'] : 0;
+
+		$sites = get_sites(
 			array(
 				'fields' => 'ids',
 				'number' => 0,
 			)
 		);
 
-		foreach ( $sites as $site_id ) {
+		$total_sites = count( $sites );
+		if ( $offset >= $total_sites ) {
+			update_site_option( self::GRANTS_KEY, $merged );
+			delete_site_option( self::MIGRATION_STATE_KEY );
+			update_site_option( self::MIGRATED_KEY, 1 );
+			return;
+		}
+
+		$time_budget = (float) apply_filters( 't3admin_migration_time_budget', 2.0 );
+		if ( $time_budget <= 0.0 ) {
+			$time_budget = 2.0;
+		}
+		$started_at = microtime( true );
+
+		for ( $i = $offset; $i < $total_sites; $i++ ) {
+			$site_id = $sites[ $i ];
 			$site_id = (int) $site_id;
 			switch_to_blog( $site_id );
 			$site_grants = (array) get_option( self::GRANTS_KEY, array() );
@@ -660,26 +680,30 @@ class Grants {
 				}
 
 				$grant = $this->normalize_grant( $grant, $site_id );
+				if ( isset( $merged[ $grant['id'] ] ) ) {
 					$original_id        = $grant['id'];
 					$grant['legacy_id'] = $original_id;
-					$grant['id']        = wp_generate_uuid4();
-					error_log(
-						sprintf(
-							't3admin grant migration resolved duplicate grant ID "%1$s" from site %2$d with new ID "%3$s".',
-							$original_id,
-							$site_id,
-							$grant['id']
-						)
-					);
-					$grant['legacy_id'] = $grant['id'];
 					$grant['id']        = wp_generate_uuid4();
 				}
 
 				$merged[ $grant['id'] ] = $grant;
 			}
+
+			$offset = $i + 1;
+			if ( ( microtime( true ) - $started_at ) >= $time_budget && $offset < $total_sites ) {
+				update_site_option(
+					self::MIGRATION_STATE_KEY,
+					array(
+						'merged' => $merged,
+						'offset' => $offset,
+					)
+				);
+				return;
+			}
 		}
 
 		update_site_option( self::GRANTS_KEY, $merged );
+		delete_site_option( self::MIGRATION_STATE_KEY );
 		update_site_option( self::MIGRATED_KEY, 1 );
 	}
 }
