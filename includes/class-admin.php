@@ -738,6 +738,7 @@ class Admin {
 			var userSelect = document.getElementById('t3u');
 			var userStatus = document.getElementById('t3_user_status');
 			var searchController = null, searchTimeout = null;
+			var lastCompletedQuery = '';
 
 			function replaceUserOptions(options) {
 				if ( ! userSelect ) {
@@ -751,6 +752,19 @@ class Admin {
 					option.value = optionConfig.value;
 					option.textContent = optionConfig.label;
 					userSelect.appendChild(option);
+				});
+			}
+
+			function getUserOptionsSnapshot() {
+				if ( ! userSelect ) {
+					return [];
+				}
+
+				return Array.from(userSelect.options).map(function (option) {
+					return {
+						value: option.value,
+						label: option.textContent
+					};
 				});
 			}
 
@@ -780,7 +794,15 @@ class Admin {
 
 					setUserStatus('');
 
+					if ( searchTimeout ) {
+						clearTimeout(searchTimeout);
+					}
+
 					if ( query.length < 2 ) {
+						if ( window.AbortController && searchController ) {
+							searchController.abort();
+							searchController = null;
+						}
 						replaceUserOptions([
 							{
 								value: '',
@@ -790,70 +812,81 @@ class Admin {
 						return;
 					}
 
-					if ( window.AbortController ) {
-						if ( searchController ) {
-							searchController.abort();
-						}
-						searchController = new AbortController();
+					if ( query === lastCompletedQuery ) {
+						return;
 					}
 
-					replaceUserOptions([
-						{
-							value: '',
-							label: '<?php echo esc_js( __( 'Searching…', 't3admin' ) ); ?>'
-						}
-					]);
+					searchTimeout = setTimeout(function () {
+						var previousOptions = getUserOptionsSnapshot();
 
-					fetch(
-						'<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>?action=t3admin_user_search&nonce=<?php echo esc_js( wp_create_nonce( 't3admin_user_search' ) ); ?>&q=' + encodeURIComponent(query),
-						{
-							credentials: 'same-origin',
-							signal: searchController ? searchController.signal : undefined
+						if ( window.AbortController ) {
+							if ( searchController ) {
+								searchController.abort();
+							}
+							searchController = new AbortController();
 						}
-					)
-						.then(function (response) {
-							return response.json();
-						})
-						.then(function (payload) {
-							var users = payload && payload.success && payload.data ? payload.data.users : [];
 
-							if ( ! users.length ) {
+						replaceUserOptions([
+							{
+								value: '',
+								label: '<?php echo esc_js( __( 'Searching…', 't3admin' ) ); ?>'
+							}
+						]);
+
+						fetch(
+							'<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>?action=t3admin_user_search&nonce=<?php echo esc_js( wp_create_nonce( 't3admin_user_search' ) ); ?>&q=' + encodeURIComponent(query),
+							{
+								credentials: 'same-origin',
+								signal: searchController ? searchController.signal : undefined
+							}
+						)
+							.then(function (response) {
+								return response.json();
+							})
+							.then(function (payload) {
+								if ( ! payload || true !== payload.success ) {
+									replaceUserOptions(previousOptions);
+									setUserStatus(payload && payload.data && payload.data.message ? payload.data.message : '<?php echo esc_js( __( 'Search failed. Try again.', 't3admin' ) ); ?>');
+									return;
+								}
+
+								var users = payload.data && payload.data.users ? payload.data.users : [];
+
+								lastCompletedQuery = query;
+
+								if ( ! users.length ) {
+									replaceUserOptions([
+										{
+											value: '',
+											label: '<?php echo esc_js( __( 'No matching users found.', 't3admin' ) ); ?>'
+										}
+									]);
+									setUserStatus('<?php echo esc_js( __( 'Try a more specific name, login, or email search.', 't3admin' ) ); ?>');
+									return;
+								}
+
 								replaceUserOptions([
 									{
 										value: '',
-										label: '<?php echo esc_js( __( 'No matching users found.', 't3admin' ) ); ?>'
+										label: '<?php echo esc_js( __( '— Select a user —', 't3admin' ) ); ?>'
 									}
-								]);
-								setUserStatus('<?php echo esc_js( __( 'Try a more specific name, login, or email search.', 't3admin' ) ); ?>');
-								return;
-							}
-
-							replaceUserOptions([
-								{
-									value: '',
-									label: '<?php echo esc_js( __( '— Select a user —', 't3admin' ) ); ?>'
+								].concat(users.map(function (user) {
+									return {
+										value: String(user.id),
+										label: user.label
+									};
+								})));
+								setUserStatus('<?php echo esc_js( __( 'Choose one matching user from the results list.', 't3admin' ) ); ?>');
+							})
+							.catch(function (error) {
+								if ( error && 'AbortError' === error.name ) {
+									return;
 								}
-							].concat(users.map(function (user) {
-								return {
-									value: String(user.id),
-									label: user.label
-								};
-							})));
-							setUserStatus('<?php echo esc_js( __( 'Choose one matching user from the results list.', 't3admin' ) ); ?>');
-						})
-						.catch(function (error) {
-							if ( error && 'AbortError' === error.name ) {
-								return;
-							}
 
-							replaceUserOptions([
-								{
-									value: '',
-									label: '<?php echo esc_js( __( 'Search failed. Try again.', 't3admin' ) ); ?>'
-								}
-								]);
-							setUserStatus('<?php echo esc_js( __( 'The live user search could not load results.', 't3admin' ) ); ?>');
-						});
+								replaceUserOptions(previousOptions);
+								setUserStatus('<?php echo esc_js( __( 'The live user search could not load results.', 't3admin' ) ); ?>');
+							});
+					}, 250);
 				});
 
 				userSelect.addEventListener('change', function () {

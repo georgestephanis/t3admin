@@ -66,17 +66,15 @@ wp plugin activate t3admin
 2. Choose a **User**:
    - Small sites show the full dropdown directly.
    - Larger sites and Network Admin show a live search field that loads matching users.
-4. Choose the **Temporary Role** to grant.
-5. On Multisite Network Admin, choose **Grant Scope**:
-
-- **Single Site**
-- **Whole Network**
-- **Super Admin (Temporary)**
-
-6. Set the **Expiry Type**:
+3. Choose the **Temporary Role** to grant.
+4. On Multisite Network Admin, choose **Grant Scope**:
+   - **Single Site**
+   - **Whole Network**
+   - **Super Admin (Temporary)**
+5. Set the **Expiry Type**:
    - **Specific date & time** — pick a datetime (the site's configured timezone applies).
    - **Duration from now** — enter a number and choose Minutes, Hours, or Days.
-7. Click **Grant Temporary Role**.
+6. Click **Grant Temporary Role**.
 
 The user's original role is recorded for audit context, and temporary capabilities take effect immediately through capability filtering.
 
