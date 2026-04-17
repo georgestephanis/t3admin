@@ -96,6 +96,13 @@ class Grants {
 			}
 			return $allcaps;
 		}
+		// On Multisite, non-super-admin grants are scoped to a single blog.
+		if ( is_multisite() && self::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
+			$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
+			if ( $grant_blog && $grant_blog !== get_current_blog_id() ) {
+				return $allcaps;
+			}
+		}
 		global $wp_roles;
 		if ( self::SUPER_ADMIN_ROLE === $grant['temporary_role'] ) {
 			// Super admin status on Multisite is handled by filter_super_admins();
@@ -160,9 +167,10 @@ class Grants {
 	 * @param string $new_role   Role slug to grant temporarily.
 	 * @param int    $expires_at Unix timestamp when the grant expires.
 	 * @param int    $granted_by ID of the admin creating the grant.
+	 * @param int    $blog_id    Blog ID the grant applies to (0 = current; ignored for super_admin).
 	 * @return array|\WP_Error Grant record on success, WP_Error on failure.
 	 */
-	public function grant( int $user_id, string $new_role, int $expires_at, int $granted_by ) {
+	public function grant( int $user_id, string $new_role, int $expires_at, int $granted_by, int $blog_id = 0 ) {
 		$user = get_user_by( 'id', $user_id );
 		if ( ! $user ) {
 			return new \WP_Error( 'invalid_user', __( 'User not found.', 't3admin' ) );
@@ -171,9 +179,15 @@ class Grants {
 		if ( $existing ) {
 			$this->revoke( $existing['id'], $granted_by, 'superseded' );
 		}
-		$original      = ! empty( $user->roles ) ? $user->roles[0] : 'subscriber';
-		$id            = wp_generate_uuid4();
-		$entry         = array(
+		// Resolve the user's current role on the target blog.
+		if ( is_multisite() && $blog_id && $blog_id !== get_current_blog_id() ) {
+			$blog_user = new \WP_User( $user_id, '', $blog_id );
+			$original  = ! empty( $blog_user->roles ) ? $blog_user->roles[0] : 'subscriber';
+		} else {
+			$original = ! empty( $user->roles ) ? $user->roles[0] : 'subscriber';
+		}
+		$id    = wp_generate_uuid4();
+		$entry = array(
 			'id'             => $id,
 			'user_id'        => $user_id,
 			'original_role'  => $original,
@@ -183,6 +197,9 @@ class Grants {
 			'expires_at'     => $expires_at,
 			'status'         => 'active',
 		);
+		if ( is_multisite() && $blog_id ) {
+			$entry['blog_id'] = $blog_id;
+		}
 		$grants        = $this->all_grants();
 		$grants[ $id ] = $entry;
 		update_option( self::GRANTS_KEY, $grants, false );

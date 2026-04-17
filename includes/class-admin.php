@@ -161,6 +161,12 @@ class Admin {
 		$out = esc_html( implode( ', ', $real_roles ) );
 
 		$grant = $this->grants->user_active_grant( $user_id );
+		if ( $grant && is_multisite() && Grants::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
+			$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
+			if ( $grant_blog && $grant_blog !== get_current_blog_id() ) {
+				$grant = null;
+			}
+		}
 		if ( $grant ) {
 			$rem = max( 0, $grant['expires_at'] - time() );
 			$h   = (int) floor( $rem / 3600 );
@@ -304,6 +310,31 @@ class Admin {
 						</select>
 					</td>
 				</tr>
+				<?php if ( is_multisite() ) : ?>
+				<tr id="t3_site">
+					<th><label for="t3s"><?php esc_html_e( 'Site', 't3admin' ); ?></label></th>
+					<td>
+						<select name="t3admin_blog_id" id="t3s">
+							<?php
+							foreach ( get_sites( array( 'number' => 500 ) ) as $site ) {
+								$site_name = get_blog_option( $site->blog_id, 'blogname' );
+								if ( ! $site_name ) {
+									/* translators: %d: site ID */
+									$site_name = sprintf( __( 'Site #%d', 't3admin' ), $site->blog_id );
+								}
+								printf(
+									'<option value="%d"%s>%s</option>',
+									esc_attr( $site->blog_id ),
+									selected( $site->blog_id, get_current_blog_id(), false ),
+									esc_html( $site_name . ' (' . $site->domain . $site->path . ')' )
+								);
+							}
+							?>
+						</select>
+						<p class="description"><?php esc_html_e( 'The site this temporary role applies to.', 't3admin' ); ?></p>
+					</td>
+				</tr>
+				<?php endif; ?>
 				<tr>
 					<th><?php esc_html_e( 'Expiry Type', 't3admin' ); ?></th>
 					<td>
@@ -357,6 +388,9 @@ class Admin {
 				<thead>
 					<tr>
 						<th><?php esc_html_e( 'User', 't3admin' ); ?></th>
+						<?php if ( is_multisite() ) : ?>
+						<th><?php esc_html_e( 'Site', 't3admin' ); ?></th>
+						<?php endif; ?>
 						<th><?php esc_html_e( 'Original Role', 't3admin' ); ?></th>
 						<th><?php esc_html_e( 'Temp Role', 't3admin' ); ?></th>
 						<th><?php esc_html_e( 'Granted By', 't3admin' ); ?></th>
@@ -386,6 +420,23 @@ class Admin {
 							}
 							?>
 						</td>
+						<?php if ( is_multisite() ) : ?>
+						<td>
+							<?php
+							if ( Grants::SUPER_ADMIN_ROLE === $g['temporary_role'] ) {
+								esc_html_e( 'All Sites', 't3admin' );
+							} elseif ( ! empty( $g['blog_id'] ) ) {
+								$site_name = get_blog_option( $g['blog_id'], 'blogname' );
+								echo $site_name
+									? esc_html( $site_name )
+									/* translators: %d: site ID */
+									: esc_html( sprintf( __( 'Site #%d', 't3admin' ), $g['blog_id'] ) );
+							} else {
+								esc_html_e( 'All Sites', 't3admin' );
+							}
+							?>
+						</td>
+						<?php endif; ?>
 						<td><?php echo esc_html( $this->grants->role_label( $g['original_role'] ) ); ?></td>
 						<td><?php echo esc_html( $this->grants->role_label( $g['temporary_role'] ) ); ?></td>
 						<td>
@@ -429,14 +480,23 @@ class Admin {
 
 		<script>
 		(function () {
-			var dtRow  = document.getElementById('t3_dt');
-			var durRow = document.getElementById('t3_dur');
+			var dtRow   = document.getElementById('t3_dt');
+			var durRow  = document.getElementById('t3_dur');
+			var siteRow = document.getElementById('t3_site');
+			var roleEl  = document.getElementById('t3r');
 			document.querySelectorAll('input[name="t3admin_expiry_type"]').forEach(function (r) {
 				r.addEventListener('change', function () {
 					dtRow.style.display  = this.value === 'datetime' ? '' : 'none';
 					durRow.style.display = this.value === 'duration' ? '' : 'none';
 				});
 			});
+			if ( siteRow && roleEl ) {
+				function updateSiteRow() {
+					siteRow.style.display = roleEl.value === '<?php echo esc_js( Grants::SUPER_ADMIN_ROLE ); ?>' ? 'none' : '';
+				}
+				roleEl.addEventListener( 'change', updateSiteRow );
+				updateSiteRow();
+			}
 		}());
 		</script>
 		<?php
@@ -524,7 +584,15 @@ class Admin {
 			exit;
 		}
 
-		$result = $this->grants->grant( $user_id, $new_role, $expires_at, get_current_user_id() );
+		$blog_id = 0;
+		if ( is_multisite() && Grants::SUPER_ADMIN_ROLE !== $new_role ) {
+			$blog_id = absint( $_POST['t3admin_blog_id'] ?? get_current_blog_id() );
+			if ( ! get_site( $blog_id ) ) {
+				$blog_id = get_current_blog_id();
+			}
+		}
+
+		$result = $this->grants->grant( $user_id, $new_role, $expires_at, get_current_user_id(), $blog_id );
 		$msg    = is_wp_error( $result ) ? $result->get_error_code() : 'granted';
 		wp_safe_redirect( add_query_arg( 't3admin_msg', $msg, admin_url( 'users.php?page=t3admin' ) ) );
 		exit;
