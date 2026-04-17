@@ -24,6 +24,7 @@ class Grants {
 	const GRANTS_KEY          = 't3admin_grants';
 	const MIGRATED_KEY        = 't3admin_grants_network_migrated';
 	const MIGRATION_STATE_KEY = 't3admin_grants_network_migration_state';
+	const CACHE_GROUP         = 't3admin';
 	const EXPIRE_HOOK         = 't3admin_expire_grant';
 	const SUPER_ADMIN_ROLE    = 'super_admin';
 	const SCOPE_SITE          = 'site';
@@ -36,6 +37,13 @@ class Grants {
 	 * @var Logger
 	 */
 	private $logger;
+
+	/**
+	 * Request-local cache for normalized grants.
+	 *
+	 * @var array<string, array>|null
+	 */
+	private $all_grants_cache = null;
 
 	/**
 	 * Constructor.
@@ -316,8 +324,19 @@ class Grants {
 	 * @return array<string, array>
 	 */
 	public function all_grants(): array {
+		if ( is_array( $this->all_grants_cache ) ) {
+			return $this->all_grants_cache;
+		}
+
 		if ( is_multisite() ) {
 			$this->maybe_migrate_to_network_storage();
+		}
+
+		$cache_key = $this->all_grants_cache_key();
+		$cached    = wp_cache_get( $cache_key, self::CACHE_GROUP );
+		if ( is_array( $cached ) ) {
+			$this->all_grants_cache = $cached;
+			return $cached;
 		}
 
 		$raw        = $this->load_grants();
@@ -332,6 +351,9 @@ class Grants {
 			}
 			$normalized[ $grant['id'] ] = $this->normalize_grant( $grant );
 		}
+
+		$this->all_grants_cache = $normalized;
+		wp_cache_set( $cache_key, $normalized, self::CACHE_GROUP );
 
 		return $normalized;
 	}
@@ -613,9 +635,11 @@ class Grants {
 	private function save_grants( array $grants ): void {
 		if ( is_multisite() ) {
 			update_site_option( self::GRANTS_KEY, $grants );
+			$this->clear_grants_cache();
 			return;
 		}
 		update_option( self::GRANTS_KEY, $grants, false );
+		$this->clear_grants_cache();
 	}
 
 	/**
@@ -653,6 +677,7 @@ class Grants {
 		$total_sites = count( $sites );
 		if ( $offset >= $total_sites ) {
 			update_site_option( self::GRANTS_KEY, $merged );
+			$this->clear_grants_cache();
 			delete_site_option( self::MIGRATION_STATE_KEY );
 			update_site_option( self::MIGRATED_KEY, 1 );
 			return;
@@ -703,7 +728,32 @@ class Grants {
 		}
 
 		update_site_option( self::GRANTS_KEY, $merged );
+		$this->clear_grants_cache();
 		delete_site_option( self::MIGRATION_STATE_KEY );
 		update_site_option( self::MIGRATED_KEY, 1 );
+	}
+
+	/**
+	 * Returns the cache key for normalized grants.
+	 *
+	 * @since 1.0.0
+	 * @return string
+	 */
+	private function all_grants_cache_key(): string {
+		if ( is_multisite() ) {
+			return 'all_grants_network_' . (string) get_current_network_id();
+		}
+
+		return 'all_grants_site_' . (string) get_current_blog_id();
+	}
+
+	/**
+	 * Clears request-local and object-cache grant snapshots.
+	 *
+	 * @since 1.0.0
+	 */
+	private function clear_grants_cache(): void {
+		$this->all_grants_cache = null;
+		wp_cache_delete( $this->all_grants_cache_key(), self::CACHE_GROUP );
 	}
 }
