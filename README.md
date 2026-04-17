@@ -2,7 +2,7 @@
 
 > Hold the title of titan, if only for a tick.
 
-A WordPress plugin that lets administrators temporarily elevate a user's role, with automatic expiry, real-time enforcement, and a full audit trail.
+A WordPress plugin that lets administrators temporarily replace a user's effective role set, with automatic expiry, real-time enforcement, and a full audit trail.
 
 [![Open in WordPress Playground](https://img.shields.io/badge/Open_in-WordPress_Playground-3858e9?style=for-the-badge&logo=wordpress&logoColor=white)](https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fraw.githubusercontent.com%2Fgeorgestephanis%2Ft3admin%2Ftrunk%2F.github%2Fblueprint.json)
 
@@ -10,7 +10,7 @@ A WordPress plugin that lets administrators temporarily elevate a user's role, w
 
 ## Features
 
-- **Temporary role elevation** — promote any user to any registered role for a set window of time.
+- **Temporary role replacement** — temporarily assign any exact role set, whether that means promotion, demotion, or no roles at all.
 - **Flexible expiry** — choose a specific date and time (interpreted in the site's timezone), or a simple duration (N minutes, hours, or days from now).
 - **Automatic expiry** — when the window closes, temporary capability overlay ends automatically. No manual cleanup required.
 - **Two-layer expiry enforcement**
@@ -22,6 +22,7 @@ A WordPress plugin that lets administrators temporarily elevate a user's role, w
 - **In-admin log viewer** — paginated log table on the **Access Logs** tab inside **Users → Temp Roles**.
 - **Multisite-aware scopes** — site admins can grant temporary access for their current site; network admins can grant single-site, whole-network, or temporary super-admin access.
 - **Adaptive user picker** — small sites get a direct user dropdown; larger sites and Network Admin use live search by display name, login, or email.
+- **WP-CLI support** — grant or revoke temporary role changes from the command line, including exact role sets and remove-all mode.
 - **Fully internationalised** — all strings are wrapped with i18n functions and the `t3admin` text domain.
 
 ---
@@ -60,14 +61,17 @@ wp plugin activate t3admin
 
 ## Usage
 
-### Granting a temporary role
+### Granting a temporary role change
 
 1. Go to **Users → Temp Roles** in wp-admin.
 2. Choose a **User**:
-   - Small sites show the full dropdown directly.
-   - Larger sites and Network Admin show a live search field that loads matching users.
+
+- Small sites show the full dropdown directly.
+- Larger sites and Network Admin show a live search field that loads matching users.
+
 3. Choose the **Temporary Role** to grant.
 4. On Multisite Network Admin, choose **Grant Scope**:
+
    - **Single Site**
    - **Whole Network**
    - **Super Admin (Temporary)**
@@ -76,7 +80,9 @@ wp plugin activate t3admin
    - **Duration from now** — enter a number and choose Minutes, Hours, or Days.
 6. Click **Grant Temporary Role**.
 
-The user's original role is recorded for audit context, and temporary capabilities take effect immediately through capability filtering.
+The user's original role set is recorded for audit context, and the temporary role set takes effect immediately through capability filtering.
+
+Selecting a lower role now behaves as a real temporary demotion. For example, changing an `editor` to `subscriber` temporarily removes editor capabilities until the grant expires.
 
 ### Revoking a grant early
 
@@ -112,7 +118,48 @@ When a grant is created:
 At expiry:
 
 - The scheduled event calls `expire_grant()`, which marks the grant as `expired` in storage and stops capability overlay.
-- Additionally, a `user_has_cap` filter runs on every request. If it detects an active grant whose `expires_at` is in the past it expires the grant inline — so even a site with broken WP-Cron cannot keep an elevated role alive past its window.
+- Additionally, a `user_has_cap` filter runs on every request. If it detects an active grant whose `expires_at` is in the past it expires the grant inline — so even a site with broken WP-Cron cannot keep a temporary role change alive past its window.
+
+## WP-CLI
+
+Use the `t3admin` command to create or revoke temporary grants from the command line.
+
+```bash
+wp t3admin grant alice --role=subscriber --duration="2 days"
+wp t3admin grant bob --roles=subscriber,author --expires="2026-04-20 17:00"
+wp t3admin grant carol --remove-roles=editor --duration="1 day"
+wp t3admin grant dave --remove-all-roles --duration="12 hours"
+wp t3admin revoke <grant-uuid>
+```
+
+Notes:
+
+- `--role` and `--roles` set the exact temporary role set.
+- `--remove-roles` derives a temporary site-scoped role set by removing specific roles from the user's current site roles.
+- `--remove-all-roles` temporarily strips all roles while leaving any direct user-specific capabilities intact.
+- Use either `--duration` or `--expires`, but not both.
+
+### Common scenarios
+
+1. Temporarily demote an editor to subscriber for two days:
+
+wp t3admin grant alice --role=subscriber --duration="2 days"
+
+2. Temporarily suspend a user by removing all roles for 12 hours:
+
+wp t3admin grant alice --remove-all-roles --duration="12 hours"
+
+3. Temporarily remove only one role from a multi-role user:
+
+wp t3admin grant alice --remove-roles=editor --duration="1 day"
+
+4. Temporarily assign an exact multi-role set:
+
+wp t3admin grant alice --roles=subscriber,author --duration="3 days"
+
+5. End a temporary change immediately:
+
+wp t3admin revoke <grant-uuid>
 
 ---
 
@@ -157,17 +204,19 @@ Each line of `access-grants.jsonl` is a self-contained JSON object. Example:
 
 Fields present on all events:
 
-| Field            | Type   | Description                         |
-| ---------------- | ------ | ----------------------------------- |
-| `timestamp`      | string | ISO 8601 UTC                        |
-| `event`          | string | `granted` \| `revoked` \| `expired` |
-| `grant_id`       | string | UUID v4                             |
-| `user_id`        | int    | Elevated user                       |
-| `original_role`  | string | Role before elevation               |
-| `temporary_role` | string | Role during elevation               |
-| `granted_by`     | int    | Admin user ID                       |
-| `granted_at`     | int    | Unix timestamp                      |
-| `expires_at`     | int    | Unix timestamp                      |
+| Field             | Type   | Description                             |
+| ----------------- | ------ | --------------------------------------- |
+| `timestamp`       | string | ISO 8601 UTC                            |
+| `event`           | string | `granted` \| `revoked` \| `expired`     |
+| `grant_id`        | string | UUID v4                                 |
+| `user_id`         | int    | Elevated user                           |
+| `original_roles`  | array  | Roles before the temporary change       |
+| `temporary_roles` | array  | Roles during the temporary change       |
+| `original_role`   | string | First original role, for compatibility  |
+| `temporary_role`  | string | First temporary role, for compatibility |
+| `granted_by`      | int    | Admin user ID                           |
+| `granted_at`      | int    | Unix timestamp                          |
+| `expires_at`      | int    | Unix timestamp                          |
 
 Additional fields on `revoked` / `expired` events:
 

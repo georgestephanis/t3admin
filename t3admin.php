@@ -18,6 +18,9 @@ require_once __DIR__ . '/includes/class-logger.php';
 require_once __DIR__ . '/includes/class-grants.php';
 require_once __DIR__ . '/includes/class-log-list-table.php';
 require_once __DIR__ . '/includes/class-admin.php';
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	require_once __DIR__ . '/includes/class-cli.php';
+}
 
 const VERSION = '1.0.0';
 
@@ -89,5 +92,8 @@ add_action(
 	function () {
 		grants()->setup_hooks();
 		admin_ui()->setup_hooks();
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			CLI::register();
+		}
 	}
 );

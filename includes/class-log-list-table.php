@@ -114,9 +114,12 @@ class Log_List_Table extends \WP_List_Table {
 
 			case 'role_change':
 				if ( isset( $item['original_role'], $item['temporary_role'] ) ) {
-					return esc_html( $this->grants->role_label( $item['original_role'] ) )
+					$original_roles  = isset( $item['original_roles'] ) && is_array( $item['original_roles'] ) ? $item['original_roles'] : array_filter( array( $item['original_role'] ) );
+					$temporary_roles = isset( $item['temporary_roles'] ) && is_array( $item['temporary_roles'] ) ? $item['temporary_roles'] : array_filter( array( $item['temporary_role'] ) );
+
+					return esc_html( $this->grants->role_set_label( $original_roles ) )
 						. ' &rarr; '
-						. esc_html( $this->grants->role_label( $item['temporary_role'] ) );
+						. esc_html( $this->grants->role_set_label( $temporary_roles ) );
 				}
 				return '';
 

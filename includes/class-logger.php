@@ -94,15 +94,17 @@ class Logger {
 	public function log( string $event, array $grant ): void {
 		$this->ensure_log_dir();
 		$entry = array(
-			'timestamp'      => gmdate( 'c' ),
-			'event'          => $event,
-			'grant_id'       => $grant['id'],
-			'user_id'        => $grant['user_id'],
-			'original_role'  => $grant['original_role'],
-			'temporary_role' => $grant['temporary_role'],
-			'granted_by'     => $grant['granted_by'],
-			'granted_at'     => $grant['granted_at'],
-			'expires_at'     => $grant['expires_at'],
+			'timestamp'       => gmdate( 'c' ),
+			'event'           => $event,
+			'grant_id'        => $grant['id'],
+			'user_id'         => $grant['user_id'],
+			'original_roles'  => $grant['original_roles'] ?? ( isset( $grant['original_role'] ) ? array( $grant['original_role'] ) : array() ),
+			'original_role'   => $grant['original_role'],
+			'temporary_roles' => $grant['temporary_roles'] ?? ( isset( $grant['temporary_role'] ) ? array( $grant['temporary_role'] ) : array() ),
+			'temporary_role'  => $grant['temporary_role'],
+			'granted_by'      => $grant['granted_by'],
+			'granted_at'      => $grant['granted_at'],
+			'expires_at'      => $grant['expires_at'],
 		);
 		if ( 'granted' !== $event ) {
 			$entry['resolved_at'] = $grant['resolved_at'] ?? time();

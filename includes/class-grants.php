@@ -97,7 +97,7 @@ class Grants {
 			return $allcaps;
 		}
 
-		global $wp_roles;
+		$applicable = array();
 
 		foreach ( $grants as $grant ) {
 			if ( $grant['expires_at'] <= time() ) {
@@ -116,23 +116,31 @@ class Grants {
 				continue;
 			}
 
-			if ( self::SUPER_ADMIN_ROLE === $grant['temporary_role'] ) {
-				// Super admin status on Multisite is handled by filter_super_admins();
-				// inject administrator capabilities here to cover direct cap checks.
-				$admin_role = $wp_roles->get_role( 'administrator' );
-				if ( $admin_role ) {
-					$allcaps = array_merge( $allcaps, $admin_role->capabilities );
-				}
-				continue;
-			}
-
-			$role = $wp_roles->get_role( $grant['temporary_role'] );
-			if ( $role ) {
-				$allcaps = array_merge( $allcaps, $role->capabilities );
-			}
+			$applicable[] = $grant;
 		}
 
-		return $allcaps;
+		if ( empty( $applicable ) ) {
+			return $allcaps;
+		}
+
+		$grant = $this->select_effective_grant( $applicable );
+		if ( null === $grant ) {
+			return $allcaps;
+		}
+
+		global $wp_roles;
+
+		if ( self::SCOPE_SUPER === $this->grant_scope( $grant ) ) {
+			// Super admin status on Multisite is handled by filter_super_admins();
+			// inject administrator capabilities here to cover direct cap checks.
+			$admin_role = $wp_roles->get_role( 'administrator' );
+			if ( $admin_role ) {
+				$allcaps = array_merge( $allcaps, $admin_role->capabilities );
+			}
+			return $allcaps;
+		}
+
+		return $this->build_temporary_capabilities( $user, $grant );
 	}
 
 	/**
@@ -189,15 +197,38 @@ class Grants {
 	 * @return array|\WP_Error Grant record on success, WP_Error on failure.
 	 */
 	public function grant( int $user_id, string $new_role, int $expires_at, int $granted_by, int $blog_id = 0, string $scope = self::SCOPE_SITE ) {
+		return $this->grant_roles( $user_id, array( $new_role ), $expires_at, $granted_by, $blog_id, $scope );
+	}
+
+	/**
+	 * Creates a temporary role-set grant for a user.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int      $user_id         ID of the user to modify.
+	 * @param string[] $temporary_roles Role slugs to apply temporarily.
+	 * @param int      $expires_at      Unix timestamp when the grant expires.
+	 * @param int      $granted_by      ID of the admin creating the grant.
+	 * @param int      $blog_id         Blog ID the grant applies to.
+	 * @param string   $scope           Scope key (site, network, super_admin).
+	 * @return array|\WP_Error
+	 */
+	public function grant_roles( int $user_id, array $temporary_roles, int $expires_at, int $granted_by, int $blog_id = 0, string $scope = self::SCOPE_SITE ) {
 		$user = get_user_by( 'id', $user_id );
 		if ( ! $user ) {
 			return new \WP_Error( 'invalid_user', __( 'User not found.', 't3admin' ) );
 		}
 
-		$scope = $this->sanitize_scope( $scope, $new_role, $blog_id );
+		$temporary_roles = $this->normalize_roles( $temporary_roles );
+		if ( is_wp_error( $temporary_roles ) ) {
+			return $temporary_roles;
+		}
+
+		$requested_primary_role = $temporary_roles[0] ?? '';
+		$scope                  = $this->sanitize_scope( $scope, $requested_primary_role, $blog_id );
 		if ( self::SCOPE_SUPER === $scope ) {
-			$new_role = self::SUPER_ADMIN_ROLE;
-			$blog_id  = 0;
+			$temporary_roles = array( self::SUPER_ADMIN_ROLE );
+			$blog_id         = 0;
 		} elseif ( self::SCOPE_NETWORK === $scope ) {
 			$blog_id = 0;
 		} elseif ( is_multisite() ) {
@@ -220,25 +251,21 @@ class Grants {
 			}
 		}
 
-		// Resolve the user's current role on the target blog.
-		if ( is_multisite() && self::SCOPE_SITE === $scope && $blog_id && get_current_blog_id() !== $blog_id ) {
-			$blog_user = new \WP_User( $user_id, '', $blog_id );
-			$original  = ! empty( $blog_user->roles ) ? $blog_user->roles[0] : 'subscriber';
-		} else {
-			$original = ! empty( $user->roles ) ? $user->roles[0] : 'subscriber';
-		}
+		$original_roles = $this->current_roles_for_target( $user_id, $blog_id, $scope );
 
 		$id    = wp_generate_uuid4();
 		$entry = array(
-			'id'             => $id,
-			'user_id'        => $user_id,
-			'original_role'  => $original,
-			'temporary_role' => $new_role,
-			'granted_by'     => $granted_by,
-			'granted_at'     => time(),
-			'expires_at'     => $expires_at,
-			'status'         => 'active',
-			'scope'          => $scope,
+			'id'              => $id,
+			'user_id'         => $user_id,
+			'original_roles'  => $original_roles,
+			'original_role'   => $original_roles[0] ?? '',
+			'temporary_roles' => $temporary_roles,
+			'temporary_role'  => $temporary_roles[0] ?? '',
+			'granted_by'      => $granted_by,
+			'granted_at'      => time(),
+			'expires_at'      => $expires_at,
+			'status'          => 'active',
+			'scope'           => $scope,
 		);
 
 		if ( is_multisite() && self::SCOPE_SITE === $scope && $blog_id ) {
@@ -252,6 +279,30 @@ class Grants {
 		$this->logger->log( 'granted', $entry );
 
 		return $entry;
+	}
+
+	/**
+	 * Returns the current roles for a user on a given scope target.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int    $user_id WordPress user ID.
+	 * @param int    $blog_id Blog ID the grant targets.
+	 * @param string $scope   Grant scope.
+	 * @return string[]
+	 */
+	public function current_roles_for_target( int $user_id, int $blog_id = 0, string $scope = self::SCOPE_SITE ): array {
+		if ( is_multisite() && self::SCOPE_SITE === $scope && $blog_id ) {
+			$blog_user = new \WP_User( $user_id, '', $blog_id );
+			return $this->sanitize_role_list( $blog_user->roles );
+		}
+
+		$user = get_user_by( 'id', $user_id );
+		if ( ! $user ) {
+			return array();
+		}
+
+		return $this->sanitize_role_list( $user->roles );
 	}
 
 	/**
@@ -407,23 +458,7 @@ class Grants {
 			}
 		}
 
-		if ( empty( $matched ) ) {
-			return null;
-		}
-
-		usort(
-			$matched,
-			function ( $a, $b ) {
-				$prio_a = $this->scope_priority( $a );
-				$prio_b = $this->scope_priority( $b );
-				if ( $prio_a === $prio_b ) {
-					return (int) $b['expires_at'] <=> (int) $a['expires_at'];
-				}
-				return $prio_b <=> $prio_a;
-			}
-		);
-
-		return $matched[0];
+		return $this->select_effective_grant( $matched );
 	}
 
 	/**
@@ -438,12 +473,77 @@ class Grants {
 	 * @return string Translated display name.
 	 */
 	public function role_label( string $slug ): string {
+		if ( '' === $slug ) {
+			return __( 'No Role', 't3admin' );
+		}
+
 		if ( self::SUPER_ADMIN_ROLE === $slug ) {
 			return __( 'Super Admin', 't3admin' );
 		}
 		global $wp_roles;
 		$name = isset( $wp_roles->roles[ $slug ]['name'] ) ? $wp_roles->roles[ $slug ]['name'] : $slug;
 		return translate_user_role( $name );
+	}
+
+	/**
+	 * Returns a human-readable label for a list of role slugs.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string[] $slugs Role slugs.
+	 * @return string
+	 */
+	public function role_set_label( array $slugs ): string {
+		if ( empty( $slugs ) ) {
+			return $this->role_label( '' );
+		}
+
+		$labels = array();
+		foreach ( $slugs as $slug ) {
+			$labels[] = $this->role_label( $slug );
+		}
+
+		return implode( ', ', $labels );
+	}
+
+	/**
+	 * Returns the original role set stored with a grant.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant Grant record.
+	 * @return string[]
+	 */
+	public function grant_original_roles( array $grant ): array {
+		if ( isset( $grant['original_roles'] ) && is_array( $grant['original_roles'] ) ) {
+			return $this->sanitize_role_list( $grant['original_roles'] );
+		}
+
+		if ( isset( $grant['original_role'] ) && is_string( $grant['original_role'] ) && '' !== $grant['original_role'] ) {
+			return array( sanitize_key( $grant['original_role'] ) );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Returns the temporary role set stored with a grant.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $grant Grant record.
+	 * @return string[]
+	 */
+	public function grant_temporary_roles( array $grant ): array {
+		if ( isset( $grant['temporary_roles'] ) && is_array( $grant['temporary_roles'] ) ) {
+			return $this->sanitize_role_list( $grant['temporary_roles'], true );
+		}
+
+		if ( isset( $grant['temporary_role'] ) && is_string( $grant['temporary_role'] ) && '' !== $grant['temporary_role'] ) {
+			return array( sanitize_key( $grant['temporary_role'] ) );
+		}
+
+		return array();
 	}
 
 	/**
@@ -462,7 +562,7 @@ class Grants {
 			}
 		}
 
-		if ( self::SUPER_ADMIN_ROLE === ( $grant['temporary_role'] ?? '' ) ) {
+		if ( in_array( self::SUPER_ADMIN_ROLE, $this->grant_temporary_roles( $grant ), true ) ) {
 			return self::SCOPE_SUPER;
 		}
 
@@ -482,8 +582,12 @@ class Grants {
 	 * @return array
 	 */
 	private function normalize_grant( array $grant ): array {
-		$scope          = $this->grant_scope( $grant );
-		$grant['scope'] = $scope;
+		$scope                    = $this->grant_scope( $grant );
+		$grant['scope']           = $scope;
+		$grant['original_roles']  = $this->grant_original_roles( $grant );
+		$grant['temporary_roles'] = $this->grant_temporary_roles( $grant );
+		$grant['original_role']   = $grant['original_roles'][0] ?? '';
+		$grant['temporary_role']  = $grant['temporary_roles'][0] ?? '';
 
 		if ( self::SCOPE_SITE === $scope ) {
 			$blog_id = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
@@ -498,7 +602,8 @@ class Grants {
 		}
 
 		if ( self::SCOPE_SUPER === $scope ) {
-			$grant['temporary_role'] = self::SUPER_ADMIN_ROLE;
+			$grant['temporary_roles'] = array( self::SUPER_ADMIN_ROLE );
+			$grant['temporary_role']  = self::SUPER_ADMIN_ROLE;
 		}
 
 		return $grant;
@@ -540,10 +645,145 @@ class Grants {
 		if ( self::SCOPE_SUPER === $scope ) {
 			return 3;
 		}
-		if ( self::SCOPE_NETWORK === $scope ) {
+		if ( self::SCOPE_SITE === $scope ) {
 			return 2;
 		}
-		return 1;
+		return self::SCOPE_NETWORK === $scope ? 1 : 0;
+	}
+
+	/**
+	 * Returns the single effective grant from a list of applicable grants.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array<int, array> $grants Applicable grants.
+	 * @return array|null
+	 */
+	private function select_effective_grant( array $grants ): ?array {
+		if ( empty( $grants ) ) {
+			return null;
+		}
+
+		usort(
+			$grants,
+			function ( $a, $b ) {
+				$prio_a = $this->scope_priority( $a );
+				$prio_b = $this->scope_priority( $b );
+				if ( $prio_a === $prio_b ) {
+					return (int) $b['expires_at'] <=> (int) $a['expires_at'];
+				}
+				return $prio_b <=> $prio_a;
+			}
+		);
+
+		return $grants[0];
+	}
+
+	/**
+	 * Builds the effective capabilities for a user under a temporary grant.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_User $user  Current user object.
+	 * @param array    $grant Effective grant record.
+	 * @return bool[]
+	 */
+	private function build_temporary_capabilities( \WP_User $user, array $grant ): array {
+		global $wp_roles;
+
+		$caps = $this->individual_user_caps( $user );
+
+		foreach ( $this->grant_temporary_roles( $grant ) as $role_slug ) {
+			$role = $wp_roles->get_role( $role_slug );
+			if ( ! $role ) {
+				continue;
+			}
+
+			$caps[ $role_slug ] = true;
+			$caps               = array_merge( $caps, $role->capabilities );
+		}
+
+		return $caps;
+	}
+
+	/**
+	 * Returns user-specific capabilities excluding role markers.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_User $user User object.
+	 * @return bool[]
+	 */
+	private function individual_user_caps( \WP_User $user ): array {
+		global $wp_roles;
+
+		$individual = array();
+		foreach ( $user->caps as $cap => $granted ) {
+			if ( isset( $wp_roles->roles[ $cap ] ) ) {
+				continue;
+			}
+
+			$individual[ $cap ] = (bool) $granted;
+		}
+
+		return $individual;
+	}
+
+	/**
+	 * Validates and normalizes a requested temporary role set.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string[] $roles Requested roles.
+	 * @return array|\WP_Error
+	 */
+	private function normalize_roles( array $roles ) {
+		$roles = $this->sanitize_role_list( $roles, true );
+
+		global $wp_roles;
+		foreach ( $roles as $role ) {
+			if ( self::SUPER_ADMIN_ROLE === $role ) {
+				return new \WP_Error( 'bad_role', __( 'Super Admin grants must use the super_admin scope.', 't3admin' ) );
+			}
+
+			if ( ! isset( $wp_roles->roles[ $role ] ) ) {
+				return new \WP_Error( 'bad_role', __( 'Invalid role selected.', 't3admin' ) );
+			}
+		}
+
+		return $roles;
+	}
+
+	/**
+	 * Sanitizes a list of role slugs.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $roles       Role slugs.
+	 * @param bool  $allow_empty Whether an empty list is allowed.
+	 * @return string[]
+	 */
+	private function sanitize_role_list( array $roles, bool $allow_empty = true ): array {
+		$sanitized = array();
+		foreach ( $roles as $role ) {
+			if ( ! is_string( $role ) ) {
+				continue;
+			}
+
+			$slug = sanitize_key( $role );
+			if ( '' === $slug ) {
+				continue;
+			}
+
+			$sanitized[] = $slug;
+		}
+
+		$sanitized = array_values( array_unique( $sanitized ) );
+		if ( $allow_empty ) {
+			return $sanitized;
+		}
+
+		return empty( $sanitized ) ? array() : $sanitized;
 	}
 
 	/**
@@ -558,6 +798,10 @@ class Grants {
 	 */
 	private function sanitize_scope( string $scope, string $new_role, int $blog_id ): string {
 		$scope = sanitize_key( $scope );
+
+		if ( self::SCOPE_SUPER === $scope ) {
+			return self::SCOPE_SUPER;
+		}
 
 		if ( self::SUPER_ADMIN_ROLE === $new_role ) {
 			return self::SCOPE_SUPER;
