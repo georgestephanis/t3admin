@@ -322,14 +322,19 @@ class Admin {
 		global $wp_roles;
 		$roles              = $wp_roles->get_names();
 		$is_network_context = $this->is_network_context();
-		$users              = get_users(
-			array(
-				'number'  => -1,
-				'orderby' => 'display_name',
-				'order'   => 'ASC',
-			)
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only search term.
+		$user_query = sanitize_text_field( wp_unslash( $_GET['t3admin_user_q'] ?? '' ) );
+		$user_args  = array(
+			'number'  => 200,
+			'orderby' => 'display_name',
+			'order'   => 'ASC',
 		);
-		$active             = $this->grants->active_grants();
+		if ( '' !== $user_query ) {
+			$user_args['search']         = '*' . $user_query . '*';
+			$user_args['search_columns'] = array( 'display_name', 'user_login', 'user_email' );
+		}
+		$users  = get_users( $user_args );
+		$active = $this->grants->active_grants();
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only redirect message.
 		$msg  = sanitize_key( $_GET['t3admin_msg'] ?? '' );
 		$msgs = array(
@@ -351,6 +356,20 @@ class Admin {
 			<?php
 		}
 		?>
+
+		<form method="get" action="<?php echo esc_url( $this->page_url() ); ?>">
+			<input type="hidden" name="page" value="t3admin">
+			<input type="hidden" name="tab" value="grants">
+			<label for="t3_user_q"><strong><?php esc_html_e( 'Find User', 't3admin' ); ?></strong></label>
+			<input type="search" id="t3_user_q" name="t3admin_user_q" value="<?php echo esc_attr( $user_query ); ?>" placeholder="<?php esc_attr_e( 'Search by name, login, or email', 't3admin' ); ?>" style="min-width:280px">
+			<?php submit_button( __( 'Search', 't3admin' ), 'secondary', '', false ); ?>
+			<?php if ( '' !== $user_query ) : ?>
+				<a class="button button-link" href="<?php echo esc_url( $this->page_url() ); ?>"><?php esc_html_e( 'Clear', 't3admin' ); ?></a>
+			<?php endif; ?>
+			<p class="description">
+				<?php esc_html_e( 'Shows up to 200 matching users. Refine your search to narrow results.', 't3admin' ); ?>
+			</p>
+		</form>
 
 		<h2><?php esc_html_e( 'Grant Temporary Role', 't3admin' ); ?></h2>
 		<form method="post" action="<?php echo esc_url( $this->post_url() ); ?>">
