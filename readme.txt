@@ -23,6 +23,7 @@ Temporary Titan Token lets administrators grant temporary role capabilities for 
 * **JSONL audit log** - all grants, revocations, and expiries are logged to a line-delimited JSON file.
 * **In-admin log viewer** - browse audit logs in the **Access Logs** tab under **Users -> Temp Roles**.
 * **Multisite scopes** - site admin grants current-site access; network admin grants single-site, whole-network, or temporary super-admin access.
+* **Adaptive user picker** - small sites get a direct dropdown; larger installs and Network Admin use live user search.
 
 = How it works =
 
@@ -48,6 +49,8 @@ No data is transmitted to external services.
 1. Upload the `t3admin` folder to `/wp-content/plugins/`.
 2. Activate the plugin via **Plugins** in wp-admin.
 3. Go to **Users -> Temp Roles** to manage grants.
+
+On smaller sites, the grant form shows the full user dropdown directly. On larger sites and in Network Admin, it switches to a live search so the form stays responsive.
 
 == Frequently Asked Questions ==
 
