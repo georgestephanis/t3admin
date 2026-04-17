@@ -12,11 +12,12 @@ Hold the title of titan, if only for a tick.
 
 == Description ==
 
-Temporary Titan Token lets administrators grant temporary role capabilities for a fixed window of time. When the window closes, the grant is automatically resolved.
+Temporary Titan Token lets administrators temporarily replace a user's effective role set for a fixed window of time. When the window closes, the grant is automatically resolved.
 
 = Key features =
 
 * **Flexible expiry** - set a specific date and time (site timezone) or a duration in minutes, hours, or days.
+* **Promotion and demotion** - temporary changes can elevate, demote, or remove roles entirely.
 * **Two-layer expiry enforcement** - each grant schedules a precise single cron event, and a `user_has_cap` safety net expires overdue grants inline.
 * **Instant revocation** - cancel any active grant immediately from the admin UI.
 * **Scoped superseding** - a new grant supersedes prior active grants for the same target scope.
@@ -24,10 +25,11 @@ Temporary Titan Token lets administrators grant temporary role capabilities for 
 * **In-admin log viewer** - browse audit logs in the **Access Logs** tab under **Users -> Temp Roles**.
 * **Multisite scopes** - site admin grants current-site access; network admin grants single-site, whole-network, or temporary super-admin access.
 * **Adaptive user picker** - small sites get a direct dropdown; larger installs and Network Admin use live user search.
+* **WP-CLI commands** - create or revoke temporary grants from the command line.
 
 = How it works =
 
-When a grant is created, the plugin stores grant metadata and schedules `wp_schedule_single_event()` for the expiry timestamp. While active, temporary capabilities are overlaid via `user_has_cap`. When expired or revoked, capability overlay stops immediately.
+When a grant is created, the plugin stores grant metadata and schedules `wp_schedule_single_event()` for the expiry timestamp. While active, `user_has_cap` replaces the user's effective role set with the temporary one. When expired or revoked, the original role set applies again immediately.
 
 = Privacy =
 
@@ -60,11 +62,15 @@ Any user with the `promote_users` capability. This is typically Administrators o
 
 = What happens if WP-Cron is delayed? =
 
-The `user_has_cap` filter checks grants during capability evaluation and expires overdue grants inline, so elevated capabilities do not outlive their window.
+The `user_has_cap` filter checks grants during capability evaluation and expires overdue grants inline, so temporary role changes do not outlive their window.
+
+= Can a user be temporarily demoted or stripped of roles? =
+
+Yes. A temporary grant now replaces the user's effective role set for its scope, so changing an `editor` to `subscriber`, removing one role from a multi-role user, or temporarily removing all roles are all supported.
 
 = Can a user have more than one active temporary grant? =
 
-Yes, across different scope targets. A new grant supersedes only grants that target the same scope key.
+Yes, across different scope targets. A new grant supersedes only grants that target the same scope key, and the most specific applicable grant wins on each site.
 
 = What happens on plugin deactivation? =
 
@@ -85,6 +91,16 @@ For Nginx, add an explicit deny rule for `/wp-content/uploads/t3admin-logs/`.
 = Is this plugin compatible with Multisite? =
 
 Yes. Site-admin context supports current-site grants. Network-admin context supports single-site, whole-network, and temporary super-admin grants.
+
+= Does it support WP-CLI? =
+
+Yes. Examples:
+
+`wp t3admin grant alice --role=subscriber --duration="2 days"`
+
+`wp t3admin grant bob --remove-all-roles --duration="12 hours"`
+
+`wp t3admin revoke <grant-uuid>`
 
 = Where can I report issues? =
 

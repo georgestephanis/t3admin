@@ -363,7 +363,7 @@ class Admin {
 		$out = esc_html( implode( ', ', $real_roles ) );
 
 		$grant = $this->grants->user_active_grant( $user_id );
-		if ( $grant && is_multisite() && Grants::SUPER_ADMIN_ROLE !== $grant['temporary_role'] ) {
+		if ( $grant && is_multisite() && Grants::SCOPE_SUPER !== $this->grants->grant_scope( $grant ) ) {
 			$grant_blog = isset( $grant['blog_id'] ) ? (int) $grant['blog_id'] : 0;
 			if ( 0 !== $grant_blog && get_current_blog_id() !== $grant_blog ) {
 				$grant = null;
@@ -385,7 +385,7 @@ class Admin {
 				wp_date( 'Y-m-d H:i', $grant['expires_at'] )
 			);
 			$out .= '<span class="t3a-temp-role" title="' . esc_attr( $expires_label ) . '">'
-				. '&#8593; ' . esc_html( $this->grants->role_label( $grant['temporary_role'] ) )
+				. esc_html__( 'Temporary: ', 't3admin' ) . esc_html( $this->grants->role_set_label( $this->grants->grant_temporary_roles( $grant ) ) )
 				. ' (' . esc_html( $remaining ) . ')'
 				. '</span>';
 		}
@@ -638,8 +638,8 @@ class Admin {
 						<?php if ( is_multisite() ) : ?>
 						<th><?php esc_html_e( 'Site', 't3admin' ); ?></th>
 						<?php endif; ?>
-						<th><?php esc_html_e( 'Original Role', 't3admin' ); ?></th>
-						<th><?php esc_html_e( 'Temp Role', 't3admin' ); ?></th>
+						<th><?php esc_html_e( 'Original Roles', 't3admin' ); ?></th>
+						<th><?php esc_html_e( 'Temp Roles', 't3admin' ); ?></th>
 						<th><?php esc_html_e( 'Granted By', 't3admin' ); ?></th>
 						<th><?php esc_html_e( 'Granted At', 't3admin' ); ?></th>
 						<th><?php esc_html_e( 'Expires At', 't3admin' ); ?></th>
@@ -670,7 +670,7 @@ class Admin {
 						<?php if ( is_multisite() ) : ?>
 						<td>
 							<?php
-							if ( Grants::SUPER_ADMIN_ROLE === $g['temporary_role'] ) {
+							if ( Grants::SCOPE_SUPER === $this->grants->grant_scope( $g ) ) {
 								esc_html_e( 'All Sites', 't3admin' );
 							} elseif ( ! empty( $g['blog_id'] ) ) {
 								$site_name = get_blog_option( $g['blog_id'], 'blogname' );
@@ -684,8 +684,8 @@ class Admin {
 							?>
 						</td>
 						<?php endif; ?>
-						<td><?php echo esc_html( $this->grants->role_label( $g['original_role'] ) ); ?></td>
-						<td><?php echo esc_html( $this->grants->role_label( $g['temporary_role'] ) ); ?></td>
+						<td><?php echo esc_html( $this->grants->role_set_label( $this->grants->grant_original_roles( $g ) ) ); ?></td>
+						<td><?php echo esc_html( $this->grants->role_set_label( $this->grants->grant_temporary_roles( $g ) ) ); ?></td>
 						<td>
 							<?php
 							if ( $granter ) {
