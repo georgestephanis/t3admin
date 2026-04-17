@@ -21,7 +21,7 @@ A WordPress plugin that lets administrators temporarily elevate a user's role, w
 - **JSONL audit log** — every grant, revocation, and automatic expiry is appended to `wp-content/uploads/t3admin-logs/access-grants.jsonl`. The directory is protected from direct HTTP access via `.htaccess` (Apache) and `web.config` (IIS).
 - **In-admin log viewer** — paginated log table on the **Access Logs** tab inside **Users → Temp Roles**.
 - **Multisite-aware scopes** — site admins can grant temporary access for their current site; network admins can grant single-site, whole-network, or temporary super-admin access.
-- **User search on grant form** — find users by display name, login, or email and load up to 200 matching results.
+- **Adaptive user picker** — small sites get a direct user dropdown; larger sites and Network Admin use live search by display name, login, or email.
 - **Fully internationalised** — all strings are wrapped with i18n functions and the `t3admin` text domain.
 
 ---
@@ -63,8 +63,9 @@ wp plugin activate t3admin
 ### Granting a temporary role
 
 1. Go to **Users → Temp Roles** in wp-admin.
-2. (Optional) Use **Find User** to search by display name, login, or email.
-3. Select a **User** from the dropdown.
+2. Choose a **User**:
+  - Small sites show the full dropdown directly.
+  - Larger sites and Network Admin show a live search field that loads matching users.
 4. Choose the **Temporary Role** to grant.
 5. On Multisite Network Admin, choose **Grant Scope**:
 

@@ -21,7 +21,9 @@ defined( 'ABSPATH' ) || exit;
  */
 class Admin {
 
-	const CAP = 'promote_users';
+	const CAP                       = 'promote_users';
+	const USER_DROPDOWN_THRESHOLD   = 25;
+	const USER_SEARCH_RESULTS_LIMIT = 50;
 
 	/**
 	 * Grants instance.
@@ -58,6 +60,7 @@ class Admin {
 	public function setup_hooks(): void {
 		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
 		add_action( 'network_admin_menu', array( $this, 'network_admin_menu' ) );
+		add_action( 'wp_ajax_t3admin_user_search', array( $this, 'handle_user_search' ) );
 		add_action( 'admin_post_t3admin_grant', array( $this, 'handle_grant' ) );
 		add_action( 'admin_post_t3admin_revoke', array( $this, 'handle_revoke' ) );
 		add_action( 'admin_head', array( $this, 'admin_styles' ) );
@@ -162,6 +165,126 @@ class Admin {
 		exit;
 	}
 
+	/**
+	 * Returns whether the current context should use the AJAX user picker.
+	 *
+	 * Network Admin always uses search. Site-level admin falls back to search
+	 * once the local user count crosses the dropdown threshold.
+	 *
+	 * @since 1.0.0
+	 * @return bool
+	 */
+	private function should_use_ajax_user_picker(): bool {
+		if ( $this->is_network_context() ) {
+			return true;
+		}
+
+		return $this->get_dropdown_user_count() > self::USER_DROPDOWN_THRESHOLD;
+	}
+
+	/**
+	 * Returns the number of users visible to the current site-level picker.
+	 *
+	 * @since 1.0.0
+	 * @return int
+	 */
+	private function get_dropdown_user_count(): int {
+		$count = count_users();
+
+		return isset( $count['total_users'] ) ? (int) $count['total_users'] : 0;
+	}
+
+	/**
+	 * Builds user query arguments for the current admin context.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param string $search Search term.
+	 * @param int    $limit  Maximum users to return.
+	 * @return array<string, mixed>
+	 */
+	private function get_user_query_args( string $search = '', int $limit = self::USER_SEARCH_RESULTS_LIMIT ): array {
+		$user_args = array(
+			'number'  => $limit,
+			'orderby' => 'display_name',
+			'order'   => 'ASC',
+		);
+
+		if ( is_multisite() && ! $this->is_network_context() ) {
+			$user_args['blog_id'] = get_current_blog_id();
+		}
+
+		if ( '' !== $search ) {
+			$user_args['search']         = '*' . $search . '*';
+			$user_args['search_columns'] = array( 'display_name', 'user_login', 'user_email' );
+		}
+
+		return $user_args;
+	}
+
+	/**
+	 * Formats the user label shown in dropdown and AJAX search results.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_User $user User object.
+	 * @return string
+	 */
+	private function get_user_option_label( \WP_User $user ): string {
+		return sprintf(
+			/* translators: 1: display name, 2: login, 3: email */
+			__( '%1$s (%2$s, %3$s)', 't3admin' ),
+			$user->display_name,
+			$user->user_login,
+			$user->user_email
+		);
+	}
+
+	/**
+	 * Handles admin-ajax powered user search for larger installs.
+	 *
+	 * @since 1.0.0
+	 */
+	public function handle_user_search(): void {
+		if ( ! current_user_can( self::CAP ) ) {
+			wp_send_json_error(
+				array(
+					'message' => __( 'Insufficient permissions.', 't3admin' ),
+				),
+				403
+			);
+		}
+
+		check_ajax_referer( 't3admin_user_search', 'nonce' );
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce handled above.
+		$query = sanitize_text_field( wp_unslash( $_GET['q'] ?? '' ) );
+
+		if ( strlen( $query ) < 2 ) {
+			wp_send_json_success(
+				array(
+					'users' => array(),
+				)
+			);
+		}
+
+		$users   = get_users( $this->get_user_query_args( $query ) );
+		$results = array();
+
+		foreach ( $users as $user ) {
+			$results[] = array(
+				'id'    => $user->ID,
+				'label' => $this->get_user_option_label( $user ),
+			);
+		}
+
+		wp_send_json_success(
+			array(
+				'users' => $results,
+			)
+		);
+	}
+
 	// -------------------------------------------------------------------------
 	// Inline styles
 	// -------------------------------------------------------------------------
@@ -179,6 +302,9 @@ class Admin {
 		.t3a-revoked { background:#fff3cd; color:#856404; }
 		.t3a-expired { background:#f8d7da; color:#721c24; }
 		.t3a-temp-role { display:block; color:#646970; font-size:11px; font-style:italic; cursor:help; }
+		.t3a-user-search-input,
+		.t3a-user-select { min-width:320px; width:min(100%, 420px); }
+		.t3a-user-select { max-width:100%; }
 		</style>
 		<?php
 	}
@@ -322,19 +448,9 @@ class Admin {
 		global $wp_roles;
 		$roles              = $wp_roles->get_names();
 		$is_network_context = $this->is_network_context();
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only search term.
-		$user_query = sanitize_text_field( wp_unslash( $_GET['t3admin_user_q'] ?? '' ) );
-		$user_args  = array(
-			'number'  => 200,
-			'orderby' => 'display_name',
-			'order'   => 'ASC',
-		);
-		if ( '' !== $user_query ) {
-			$user_args['search']         = '*' . $user_query . '*';
-			$user_args['search_columns'] = array( 'display_name', 'user_login', 'user_email' );
-		}
-		$users  = get_users( $user_args );
-		$active = $this->grants->active_grants();
+		$use_user_search    = $this->should_use_ajax_user_picker();
+		$dropdown_users     = $use_user_search ? array() : get_users( $this->get_user_query_args( '', max( 1, $this->get_dropdown_user_count() ) ) );
+		$active             = $this->grants->active_grants();
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only redirect message.
 		$msg  = sanitize_key( $_GET['t3admin_msg'] ?? '' );
 		$msgs = array(
@@ -357,20 +473,6 @@ class Admin {
 		}
 		?>
 
-		<form method="get" action="<?php echo esc_url( $this->page_url() ); ?>">
-			<input type="hidden" name="page" value="t3admin">
-			<input type="hidden" name="tab" value="grants">
-			<label for="t3_user_q"><strong><?php esc_html_e( 'Find User', 't3admin' ); ?></strong></label>
-			<input type="search" id="t3_user_q" name="t3admin_user_q" value="<?php echo esc_attr( $user_query ); ?>" placeholder="<?php esc_attr_e( 'Search by name, login, or email', 't3admin' ); ?>" style="min-width:280px">
-			<?php submit_button( __( 'Search', 't3admin' ), 'secondary', '', false ); ?>
-			<?php if ( '' !== $user_query ) : ?>
-				<a class="button button-link" href="<?php echo esc_url( $this->page_url() ); ?>"><?php esc_html_e( 'Clear', 't3admin' ); ?></a>
-			<?php endif; ?>
-			<p class="description">
-				<?php esc_html_e( 'Shows up to 200 matching users. Refine your search to narrow results.', 't3admin' ); ?>
-			</p>
-		</form>
-
 		<h2><?php esc_html_e( 'Grant Temporary Role', 't3admin' ); ?></h2>
 		<form method="post" action="<?php echo esc_url( $this->post_url() ); ?>">
 			<?php wp_nonce_field( 't3admin_grant' ); ?>
@@ -391,14 +493,35 @@ class Admin {
 				<tr>
 					<th><label for="t3u"><?php esc_html_e( 'User', 't3admin' ); ?></label></th>
 					<td>
+						<?php if ( $use_user_search ) : ?>
+							<label class="screen-reader-text" for="t3_user_search"><?php esc_html_e( 'Find User', 't3admin' ); ?></label>
+							<input
+								type="search"
+								id="t3_user_search"
+								class="t3a-user-search-input"
+								placeholder="<?php esc_attr_e( 'Type at least 2 characters to search users', 't3admin' ); ?>"
+								autocomplete="off"
+							>
+							<p class="description">
+								<?php esc_html_e( 'Large user lists use live search. Search by display name, login, or email, then choose one result below.', 't3admin' ); ?>
+							</p>
+							<select name="t3admin_user_id" id="t3u" class="t3a-user-select" size="8" required>
+								<option value=""><?php esc_html_e( 'Type to search for a user…', 't3admin' ); ?></option>
+							</select>
+							<p class="description" id="t3_user_status" aria-live="polite"></p>
+						<?php else : ?>
 						<select name="t3admin_user_id" id="t3u" required>
 							<option value=""><?php esc_html_e( '— Select a user —', 't3admin' ); ?></option>
-							<?php foreach ( $users as $u ) : ?>
+							<?php foreach ( $dropdown_users as $u ) : ?>
 								<option value="<?php echo esc_attr( $u->ID ); ?>">
-									<?php echo esc_html( $u->display_name . ' (' . $u->user_login . ')' ); ?>
+									<?php echo esc_html( $this->get_user_option_label( $u ) ); ?>
 								</option>
 							<?php endforeach; ?>
 						</select>
+						<p class="description">
+							<?php esc_html_e( 'Small sites show the full user list directly for faster selection.', 't3admin' ); ?>
+						</p>
+						<?php endif; ?>
 					</td>
 				</tr>
 				<tr id="t3_role_row">
@@ -611,12 +734,137 @@ class Admin {
 			var roleRow    = document.getElementById('t3_role_row');
 			var roleEl     = document.getElementById('t3r');
 			var superNote  = document.getElementById('t3_super_note');
+			var userSearch = document.getElementById('t3_user_search');
+			var userSelect = document.getElementById('t3u');
+			var userStatus = document.getElementById('t3_user_status');
+			var searchController = null;
+
+			function replaceUserOptions(options) {
+				if ( ! userSelect ) {
+					return;
+				}
+
+				userSelect.innerHTML = '';
+
+				options.forEach(function (optionConfig) {
+					var option = document.createElement('option');
+					option.value = optionConfig.value;
+					option.textContent = optionConfig.label;
+					userSelect.appendChild(option);
+				});
+			}
+
+			function setUserStatus(message) {
+				if ( userStatus ) {
+					userStatus.textContent = message;
+				}
+			}
+
 			document.querySelectorAll('input[name="t3admin_expiry_type"]').forEach(function (r) {
 				r.addEventListener('change', function () {
 					dtRow.style.display  = this.value === 'datetime' ? '' : 'none';
 					durRow.style.display = this.value === 'duration' ? '' : 'none';
 				});
 			});
+
+			if ( userSearch && userSelect ) {
+				replaceUserOptions([
+					{
+						value: '',
+						label: '<?php echo esc_js( __( 'Type at least 2 characters to search users…', 't3admin' ) ); ?>'
+					}
+				]);
+
+				userSearch.addEventListener('input', function () {
+					var query = userSearch.value.trim();
+
+					setUserStatus('');
+
+					if ( query.length < 2 ) {
+						replaceUserOptions([
+							{
+								value: '',
+								label: '<?php echo esc_js( __( 'Type at least 2 characters to search users…', 't3admin' ) ); ?>'
+							}
+						]);
+						return;
+					}
+
+					if ( window.AbortController ) {
+						if ( searchController ) {
+							searchController.abort();
+						}
+						searchController = new AbortController();
+					}
+
+					replaceUserOptions([
+						{
+							value: '',
+							label: '<?php echo esc_js( __( 'Searching…', 't3admin' ) ); ?>'
+						}
+					]);
+
+					fetch(
+						'<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>?action=t3admin_user_search&nonce=<?php echo esc_js( wp_create_nonce( 't3admin_user_search' ) ); ?>&q=' + encodeURIComponent(query),
+						{
+							credentials: 'same-origin',
+							signal: searchController ? searchController.signal : undefined
+						}
+					)
+						.then(function (response) {
+							return response.json();
+						})
+						.then(function (payload) {
+							var users = payload && payload.success && payload.data ? payload.data.users : [];
+
+							if ( ! users.length ) {
+								replaceUserOptions([
+									{
+										value: '',
+										label: '<?php echo esc_js( __( 'No matching users found.', 't3admin' ) ); ?>'
+									}
+								]);
+								setUserStatus('<?php echo esc_js( __( 'Try a more specific name, login, or email search.', 't3admin' ) ); ?>');
+								return;
+							}
+
+							replaceUserOptions([
+								{
+									value: '',
+									label: '<?php echo esc_js( __( '— Select a user —', 't3admin' ) ); ?>'
+								}
+							].concat(users.map(function (user) {
+								return {
+									value: String(user.id),
+									label: user.label
+								};
+							})));
+							setUserStatus('<?php echo esc_js( __( 'Choose one matching user from the results list.', 't3admin' ) ); ?>');
+						})
+						.catch(function (error) {
+							if ( error && 'AbortError' === error.name ) {
+								return;
+							}
+
+							replaceUserOptions([
+								{
+									value: '',
+									label: '<?php echo esc_js( __( 'Search failed. Try again.', 't3admin' ) ); ?>'
+								}
+								]);
+							setUserStatus('<?php echo esc_js( __( 'The live user search could not load results.', 't3admin' ) ); ?>');
+						});
+				});
+
+				userSelect.addEventListener('change', function () {
+					if ( ! userSelect.value ) {
+						return;
+					}
+
+					setUserStatus(userSelect.options[userSelect.selectedIndex].text);
+				});
+			}
+
 			if ( scopeEl ) {
 				function updateScopeControls() {
 					var isSuperScope = scopeEl.value === '<?php echo esc_js( Grants::SCOPE_SUPER ); ?>';
