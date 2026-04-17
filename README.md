@@ -64,8 +64,8 @@ wp plugin activate t3admin
 
 1. Go to **Users → Temp Roles** in wp-admin.
 2. Choose a **User**:
-  - Small sites show the full dropdown directly.
-  - Larger sites and Network Admin show a live search field that loads matching users.
+   - Small sites show the full dropdown directly.
+   - Larger sites and Network Admin show a live search field that loads matching users.
 4. Choose the **Temporary Role** to grant.
 5. On Multisite Network Admin, choose **Grant Scope**:
 
