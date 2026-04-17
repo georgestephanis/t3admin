@@ -72,10 +72,9 @@ wp plugin activate t3admin
 3. Choose the **Temporary Role** to grant.
 4. On Multisite Network Admin, choose **Grant Scope**:
 
-- **Single Site**
-- **Whole Network**
-- **Super Admin (Temporary)**
-
+   - **Single Site**
+   - **Whole Network**
+   - **Super Admin (Temporary)**
 5. Set the **Expiry Type**:
    - **Specific date & time** — pick a datetime (the site's configured timezone applies).
    - **Duration from now** — enter a number and choose Minutes, Hours, or Days.
@@ -144,23 +143,23 @@ Notes:
 
 1. Temporarily demote an editor to subscriber for two days:
 
-  wp t3admin grant alice --role=subscriber --duration="2 days"
+wp t3admin grant alice --role=subscriber --duration="2 days"
 
 2. Temporarily suspend a user by removing all roles for 12 hours:
 
-  wp t3admin grant alice --remove-all-roles --duration="12 hours"
+wp t3admin grant alice --remove-all-roles --duration="12 hours"
 
 3. Temporarily remove only one role from a multi-role user:
 
-  wp t3admin grant alice --remove-roles=editor --duration="1 day"
+wp t3admin grant alice --remove-roles=editor --duration="1 day"
 
 4. Temporarily assign an exact multi-role set:
 
-  wp t3admin grant alice --roles=subscriber,author --duration="3 days"
+wp t3admin grant alice --roles=subscriber,author --duration="3 days"
 
 5. End a temporary change immediately:
 
-  wp t3admin revoke <grant-uuid>
+wp t3admin revoke <grant-uuid>
 
 ---
 
